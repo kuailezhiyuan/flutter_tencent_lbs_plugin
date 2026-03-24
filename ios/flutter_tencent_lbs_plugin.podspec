@@ -16,6 +16,7 @@ A new Flutter plugin project.
   s.ios.vendored_frameworks = 'Frameworks/TencentLBS.framework'
   s.vendored_frameworks = 'TencentLBS.framework'
   s.source_files = 'Classes/**/*'
+  s.libraries = 'c++'
   s.dependency 'Flutter'
   s.platform = :ios, '11.0'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'arm64 i386' }
