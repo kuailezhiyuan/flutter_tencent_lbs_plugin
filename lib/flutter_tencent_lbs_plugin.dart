@@ -5,6 +5,7 @@ import 'model/android_notification_options.dart';
 import 'model/location.dart';
 import 'state/location_state.dart';
 import 'src/flutter_tencent_lbs_plugin_pigeon_platform.dart';
+import 'src/location_request_validation.dart';
 
 export 'model/android_notification_options.dart';
 export 'model/enum.dart';
@@ -16,11 +17,26 @@ class FlutterTencentLBSPlugin {
   static void _ensurePigeon() {
     if (_pigeonRegistered) return;
     _pigeonRegistered = true;
-    FlutterTencentLBSPluginPlatform.instance = FlutterTencentLBSPluginPigeonPlatform();
+    FlutterTencentLBSPluginPlatform.instance =
+        FlutterTencentLBSPluginPigeonPlatform();
   }
 
   FlutterTencentLBSPlugin() {
     _ensurePigeon();
+  }
+
+  /// 开关 Dart 定位请求日志，可在初始化前或定位运行中调用，不重启定位。
+  /// 默认关闭；未传 [onLog] 时输出到 Flutter 控制台。
+  /// 只记录启动、停止、请求变更及调用结果，不逐点记录位置。
+  /// 传入回调可将日志接入 App 的日志文件。回调异常不会打断定位。
+  Future<void> setDebugLogging({
+    required bool enabled,
+    void Function(String message)? onLog,
+  }) {
+    return FlutterTencentLBSPluginPlatform.instance.setDebugLogging(
+      enabled: enabled,
+      onLog: onLog,
+    );
   }
 
   /// 初始化 SDK。
@@ -39,7 +55,7 @@ class FlutterTencentLBSPlugin {
     /// 定位结果信息级别：0=GEO, 1=NAME, 3=ADMIN_AREA, 4=POI，与 TencentLocationRequest.requestLevel 一致
     int requestLevel = TencentLBSRequestLevel.AdminName,
 
-    /// Android：定位模式 10=高精度 11=仅网络 12=仅GPS；iOS 忽略
+    /// 双端：10=高精度、11=低功耗；12=仅 GPS（只支持 Android）。
     int locMode = TencentLBSLocMode.HIGH_ACCURACY_MODE,
 
     /// Android：是否允许使用 GPS
@@ -54,6 +70,7 @@ class FlutterTencentLBSPlugin {
     /// Android：卫星优先时的超时时间 ms，最多 60000
     int gpsFirstTimeOut = 5000,
   }) async {
+    validateLocationRequest(locMode: locMode);
     return await FlutterTencentLBSPluginPlatform.instance.init(
       key: key,
       coordinateType: coordinateType ?? TencentLBSLocationCoordinateType.WGS84,
@@ -93,8 +110,15 @@ class FlutterTencentLBSPlugin {
     bool? allowCache,
     bool? gpsFirst,
     int? gpsFirstTimeOutMs,
+    double? iosDesiredAccuracy,
+    double? iosDistanceFilter,
   }) async {
-    _validateIntervalMs(interval);
+    validateLocationRequest(
+      intervalMs: interval,
+      locMode: locMode,
+      iosDesiredAccuracy: iosDesiredAccuracy,
+      iosDistanceFilter: iosDistanceFilter,
+    );
     return await FlutterTencentLBSPluginPlatform.instance.getLocation(
       interval: interval,
       androidNotificationOptions: androidNotificationOptions,
@@ -105,12 +129,17 @@ class FlutterTencentLBSPlugin {
       allowCache: allowCache,
       gpsFirst: gpsFirst,
       gpsFirstTimeOutMs: gpsFirstTimeOutMs,
+      iosDesiredAccuracy: iosDesiredAccuracy,
+      iosDistanceFilter: iosDistanceFilter,
     );
   }
 
   /// 连续定位开启后，动态更新请求参数。
   ///
   /// 仅需传要变更的字段；[intervalMs] 若传入则必须 `>= 1000`，否则抛 [RangeError]。
+  /// 双端切换不主动停止定位或后台服务。iOS 的模式对应精度要求；
+  /// [iosDesiredAccuracy] 可覆盖模式的默认精度，[iosDistanceFilter] 单位米。
+  /// iOS 的间隔由插件对新定位回调节流，不会定时重复发送缓存位置。
   Future<void> updateLocationRequest({
     int? intervalMs,
     int? requestLevel,
@@ -119,10 +148,15 @@ class FlutterTencentLBSPlugin {
     bool? allowGps,
     bool? allowCache,
     bool? gpsFirst,
+    double? iosDesiredAccuracy,
+    double? iosDistanceFilter,
   }) async {
-    if (intervalMs != null) {
-      _validateIntervalMs(intervalMs);
-    }
+    validateLocationRequest(
+      intervalMs: intervalMs,
+      locMode: locMode,
+      iosDesiredAccuracy: iosDesiredAccuracy,
+      iosDistanceFilter: iosDistanceFilter,
+    );
     return await FlutterTencentLBSPluginPlatform.instance.updateLocationRequest(
       intervalMs: intervalMs,
       requestLevel: requestLevel,
@@ -131,6 +165,8 @@ class FlutterTencentLBSPlugin {
       allowGps: allowGps,
       allowCache: allowCache,
       gpsFirst: gpsFirst,
+      iosDesiredAccuracy: iosDesiredAccuracy,
+      iosDistanceFilter: iosDistanceFilter,
     );
   }
 
@@ -156,22 +192,20 @@ class FlutterTencentLBSPlugin {
 
   /// 移除定位失败回调（需传入与 [addFailListener] 相同的引用）
   void removeFailListener(LocationCallBack listener) {
-    FlutterTencentLBSPluginPlatform.instance.state.failListener.remove(listener);
+    FlutterTencentLBSPluginPlatform.instance.state.failListener.remove(
+      listener,
+    );
   }
 
   /// 移除状态回调（需传入与 [addStatusListener] 相同的引用）
   void removeStatusListener(LocationStatusListener listener) {
-    FlutterTencentLBSPluginPlatform.instance.state.statusListener.remove(listener);
+    FlutterTencentLBSPluginPlatform.instance.state.statusListener.remove(
+      listener,
+    );
   }
 
   /// 停止连续定位。
   void stop() {
     FlutterTencentLBSPluginPlatform.instance.stop();
-  }
-
-  static void _validateIntervalMs(int intervalMs) {
-    if (intervalMs < 1000) {
-      throw RangeError.value(intervalMs, 'intervalMs', '必须大于等于 1000 毫秒');
-    }
   }
 }

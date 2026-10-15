@@ -95,7 +95,7 @@ Future<bool> init({
   int? coordinateType,                     // 坐标系：见 TencentLBSLocationCoordinateType
   bool mockEnable = false,                 // 是否允许 Mock 定位
   int requestLevel = TencentLBSRequestLevel.AdminName,  // 结果级别
-  int locMode = TencentLBSLocMode.HIGH_ACCURACY_MODE,   // 定位模式（仅 Android）
+  int locMode = TencentLBSLocMode.HIGH_ACCURACY_MODE,   // 双端高精度/低功耗；仅 GPS 只支持 Android
   bool isAllowGPS = true,                 // Android：是否允许 GPS
   bool isIndoorLocationMode = false,      // Android：室内定位
   bool isGpsFirst = false,                 // Android：首次是否等卫星
@@ -107,7 +107,8 @@ Future<bool> init({
 
 - **坐标系** `TencentLBSLocationCoordinateType`：`GCJ02 = 0`（火星），`WGS84 = 1`（地球）。
 - **结果级别** `TencentLBSRequestLevel`：`Geo = 0`（仅经纬度），`Name = 1`，`AdminName = 3`，`Poi = 4`。
-- **定位模式** `TencentLBSLocMode`（仅 Android）：`HIGH_ACCURACY_MODE = 10`，`ONLY_NETWORK_MODE = 11`（省电），`ONLY_GPS_MODE = 12`。
+- **定位模式** `TencentLBSLocMode`：`HIGH_ACCURACY_MODE = 10`；`LOW_POWER_MODE = 11`（兼容 `ONLY_NETWORK_MODE`）；`ONLY_GPS_MODE = 12`（仅 Android）。iOS 的 10/11 分别对应 `kCLLocationAccuracyBest` / `kCLLocationAccuracyHundredMeters`，不能指定只使用网络或 GPS；传入 12 会返回 `unsupported-mode`。
+- **iOS 精度** `TencentLBSIosAccuracy`：`best = -1`、`bestForNavigation = -2`、`nearestTenMeters = 10`、`hundredMeters = 100`、`kilometer = 1000`、`threeKilometers = 3000`。数值是精度要求，不保证实际精度或关闭 GPS。
 
 ### 2. 隐私协议 `setUserAgreePrivacy()`
 
@@ -134,6 +135,8 @@ Future<void> getLocation({
   bool? allowCache,
   bool? gpsFirst,
   int? gpsFirstTimeOutMs,
+  double? iosDesiredAccuracy,                        // iOS 精度要求，覆盖 locMode 的默认精度
+  double? iosDistanceFilter,                         // iOS 最小位移，-1=不进行距离过滤
 }) async
 ```
 
@@ -152,8 +155,54 @@ Future<void> updateLocationRequest({
   bool? allowGps,
   bool? allowCache,
   bool? gpsFirst,
+  double? iosDesiredAccuracy,
+  double? iosDistanceFilter,
 }) async
 ```
+
+更新期间保持原有定位会话和后台服务：Android 仅改间隔时调用 `changeCallbackInterval`，其余参数使用同一 listener 再次调用 `requestLocationUpdates`，不先 `removeUpdates`；iOS 原地更新 `desiredAccuracy`、`distanceFilter` 和 `requestLevel`，不调用 `stopUpdatingLocation`。
+
+iOS 启动时关闭 SDK 的周期回调计时器（`locationCallbackInterval = 0`），由插件按 `interval` 对新定位结果节流。运行中改变间隔立即作用于后续新结果，不重启定位，也不定时重复发送旧位置；减少 GPS 耗电仍需降低精度要求。单次定位不参与此节流。
+
+```dart
+// 已经开始连续定位后，切到低功耗档。
+await plugin.updateLocationRequest(
+  locMode: TencentLBSLocMode.LOW_POWER_MODE,
+  intervalMs: 30000,
+  allowGps: false,        // Android 参数
+  iosDistanceFilter: 50,
+);
+
+// 重新移动时恢复高精度。
+await plugin.updateLocationRequest(
+  locMode: TencentLBSLocMode.HIGH_ACCURACY_MODE,
+  intervalMs: 1000,
+  allowGps: true,
+  iosDistanceFilter: -1,
+);
+```
+
+更新失败会通过 Future 抛出 `PlatformException`；Android 保留插件中上一份成功请求，不主动停止后台服务。仅传需要变更的字段，省略字段保持当前配置；`iosDesiredAccuracy` 在同一次更新中优先于 `locMode` 的默认精度。开始前或停止后更新会返回 `not-started`。运动状态识别和自动切档由调用方决定。
+
+SDK 文档：[Android TencentLocationManager](https://mapapi.qq.com/sdk/locationSDK/Android/doc/com/tencent/map/geolocation/TencentLocationManager.html)、[iOS TencentLBSLocationManager](https://mapapi.qq.com/sdk/locationSDK/iOS/doc/appledoc/html/Classes/TencentLBSLocationManager.html)。后台系统调度、权限变化或进程被终止仍可能影响定位，不能由参数切换接口保证永久运行。
+
+运动状态识别与自动切档策略由宿主 App 管理，可以配合独立的运动识别插件。此插件负责运行中更新定位请求和提供切档诊断，不启动运动传感器或请求运动权限。
+
+### 切档诊断日志（可选）
+
+默认关闭，可在初始化前或连续定位运行中开启，不会重启定位：
+
+```dart
+await plugin.setDebugLogging(
+  enabled: true,
+  onLog: (message) => appLogger.info(message),
+);
+
+// 关闭日志，不影响定位。
+await plugin.setDebugLogging(enabled: false);
+```
+
+日志仅在 Dart 调用边界记录连续定位启动、更新、停止的请求参数，以及原生调用的成功或异常结果。`onLog` 是可选的 `void Function(String)` 回调；未传时使用 Flutter `debugPrint`，回调异常不会中断定位。不增加原生日志通道，不逐点记录位置，也不记录 API key、经纬度或地址。日志中的成功表示原生方法返回成功，不代表已经收到定位结果。
 
 ### 6. 监听与停止
 
@@ -240,8 +289,8 @@ void stop();
 
 ## 省电建议（SDK 文档）
 
-- **定位模式**：对精度要求不高时使用 `TencentLBSLocMode.ONLY_NETWORK_MODE`（11），不启 GPS，耗电更低。
-- **间隔**：`interval` / `intervalMs` 适当加大（如 10s、15s）可降低耗电。
+- **定位模式**：对精度要求不高时使用 `TencentLBSLocMode.LOW_POWER_MODE`（11）。Android 使用仅网络定位；iOS 请求百米精度，由系统选择定位硬件。
+- **间隔**：Android 可运行中调用原生 `changeCallbackInterval` 调整 GPS 回调频率；iOS 的插件节流减少回调处理，定位硬件节能主要通过精度和距离过滤实现。
 - **allowGps**：Android 可传 `false` 减少 GPS 使用。
 - **gpsFirst / gpsFirstTimeOutMs**：信号差时缩短超时或关闭“GPS 优先”，避免长时间搜星耗电。
 
@@ -262,8 +311,10 @@ void stop();
 - **Pigeon 实现**：`lib/src/flutter_tencent_lbs_plugin_pigeon_platform.dart`，实现接口并调用 Pigeon 生成 API；将 Pigeon 的 `LocationData` 转为对外 `Location`。
 - **Pigeon 定义**：`pigeons/location_api.dart`。修改后需执行：  
   `dart run pigeon --input pigeons/location_api.dart`  
-  会生成：`lib/src/pigeon/location_pigeon.dart`、Android `pigeon/LocationPigeon.kt` 与 `TencentLBSHostApiImpl.kt`、iOS `ios/flutter_tencent_lbs_plugin/Sources/flutter_tencent_lbs_plugin/pigeon/LocationPigeon.swift`。**序列化格式为 List（按字段顺序），不可改为 Map；维护时只改 pigeons 定义并重新生成即可。**
-- **原生层**：Android 实现位于 `android/.../pigeon/TencentLBSHostApiImpl.kt`；iOS 为 `ios/flutter_tencent_lbs_plugin/Sources/flutter_tencent_lbs_plugin/TencentLBSHostApiImpl.swift`、`FlutterTencentLbsPlugin.swift`（支持 CocoaPods + SPM 双模式），仅使用 Swift + Pigeon，无 ObjC Pigeon、无 Bridging Header。
+  会生成：`lib/src/pigeon/location_pigeon.dart`、Android `pigeon/LocationPigeon.kt`、iOS `ios/flutter_tencent_lbs_plugin/Sources/flutter_tencent_lbs_plugin/pigeon/LocationPigeon.swift`。**序列化格式为 List（按字段顺序），不可改为 Map；修改通信协议时应修改 pigeons 定义并重新生成，勿手改生成文件。**
+- **原生层（手写）**：Android 实现位于 `android/.../pigeon/TencentLBSHostApiImpl.kt`；iOS 为 `ios/flutter_tencent_lbs_plugin/Sources/flutter_tencent_lbs_plugin/TencentLBSHostApiImpl.swift`、`FlutterTencentLbsPlugin.swift`（支持 CocoaPods + SPM 双模式），仅使用 Swift + Pigeon，无 ObjC Pigeon、无 Bridging Header。
+- **请求校验与节流**：`lib/src/location_request_validation.dart` 由公开 API 和 Pigeon 平台实现共用；iOS `LocationCallbackThrottle.swift` 独立维护新回调的节流，不负责定位生命周期。
+- **测试**：`test/runtime_location_request_test.dart` 分为请求行为与可选日志两组，共享 Pigeon mock；Android 请求测试和 Swift 节流测试分别验证对应原生职责。
 - **已废弃**：无 MethodChannel 实现；iOS 无 ObjC Pigeon 输出；插件不再生成或依赖 `LocationCode`、Bridging Header。
 
 ---

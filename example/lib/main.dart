@@ -70,7 +70,7 @@ class _MainAppState extends State<MainApp> {
   Future<void> _initAndRegister() async {
     try {
       await locationPlugin.setUserAgreePrivacy();
-      await locationPlugin.init(key: "YOUR KEY");
+      await locationPlugin.init(key: "TFKBZ-FFLA4-UU7U6-FCROC-TOFSH-AEBIM");
     } catch (err) {
       if (!mounted) return;
       setState(() => _lastError = '初始化失败: $err');

@@ -65,8 +65,10 @@ class TencentLBSHostApiImpl(
         androidNotificationOptions: AndroidNotificationOptions?,
     ) {
         val manager = locationManager ?: return
-        val req = tencentLocationRequest ?: return
-        if (isListeningLocationUpdates) return
+        val previous = tencentLocationRequest ?: return
+        if (isListeningLocationUpdates) {
+            return
+        }
         // 后台定位必须提供通知配置且 id > 0，否则无法启用前台服务
         if (request.backgroundLocation == true) {
             if (androidNotificationOptions == null || androidNotificationOptions.id.toInt() <= 0) {
@@ -74,14 +76,11 @@ class TencentLBSHostApiImpl(
                 return
             }
         }
-        isListeningLocationUpdates = true
-
         val intervalError = validateIntervalMs(request.intervalMs)
         if (intervalError != null) {
-            isListeningLocationUpdates = false
-            flutterApi.onError(-1L, intervalError) {}
-            return
+            throw FlutterError("invalid-argument", intervalError)
         }
+        val req = TencentLocationRequest(previous)
         req.interval = request.intervalMs
         applyCommonRequestOptions(
             req = req,
@@ -100,14 +99,20 @@ class TencentLBSHostApiImpl(
                 manager.enableForegroundLocation(notifId, NotificationUtils.buildNotification(context, opts))
             }
         }
-        manager.requestLocationUpdates(req, this)
+        val errorCode = manager.requestLocationUpdates(req, this, Looper.getMainLooper())
+        if (errorCode != TencentLocation.ERROR_OK) {
+            if (request.backgroundLocation == true) manager.disableForegroundLocation(true)
+            throw FlutterError("location-request-failed", "开启连续定位失败", errorCode)
+        }
+        tencentLocationRequest = req
+        isListeningLocationUpdates = true
     }
 
     override fun updateLocationRequest(update: LocationRequestUpdate?) {
         if (update == null) return
         val manager = locationManager ?: return
         val req = tencentLocationRequest ?: return
-        if (!isListeningLocationUpdates) return
+        if (!isListeningLocationUpdates) throw FlutterError("not-started", "请先开启连续定位")
 
         val onlyInterval = update.intervalMs != null &&
             update.requestLevel == null &&
@@ -117,28 +122,34 @@ class TencentLBSHostApiImpl(
             update.allowCache == null &&
             update.gpsFirst == null
 
-        if (onlyInterval && update.intervalMs != null && update.intervalMs!! > 0) {
+        if (onlyInterval) {
             val interval = update.intervalMs!!
             val intervalError = validateIntervalMs(interval)
             if (intervalError != null) {
-                flutterApi.onError(-1L, intervalError) {}
-                return
+                throw FlutterError("invalid-argument", intervalError)
             }
             manager.changeCallbackInterval(interval)
             req.interval = interval
             return
         }
 
+        // iOS-only fields and an empty update must not re-register Android.
+        if (update.intervalMs == null && update.requestLevel == null && update.locMode == null &&
+            update.gpsFirstTimeOutMs == null && update.allowGps == null &&
+            update.allowCache == null && update.gpsFirst == null) {
+            return
+        }
+
+        val nextRequest = TencentLocationRequest(req)
         update.intervalMs?.let {
             val intervalError = validateIntervalMs(it)
             if (intervalError != null) {
-                flutterApi.onError(-1L, intervalError) {}
-                return
+                throw FlutterError("invalid-argument", intervalError)
             }
-            req.interval = it
+            nextRequest.interval = it
         }
         applyCommonRequestOptions(
-            req = req,
+            req = nextRequest,
             requestLevel = update.requestLevel,
             locMode = update.locMode,
             allowGps = update.allowGps,
@@ -147,8 +158,13 @@ class TencentLBSHostApiImpl(
             gpsFirstTimeOutMs = update.gpsFirstTimeOutMs,
         )
 
-        manager.removeUpdates(this)
-        manager.requestLocationUpdates(req, this)
+        // Re-submit with the same listener; removeUpdates would stop the engine.
+        // Keep the foreground service and the old request if registration fails.
+        val errorCode = manager.requestLocationUpdates(nextRequest, this, Looper.getMainLooper())
+        if (errorCode != TencentLocation.ERROR_OK) {
+            throw FlutterError("location-request-failed", "更新定位请求失败，保留原请求", errorCode)
+        }
+        tencentLocationRequest = nextRequest
     }
 
     override fun stopLocationUpdates() {
@@ -232,7 +248,14 @@ class TencentLBSHostApiImpl(
         gpsFirstTimeOutMs: Long?,
     ) {
         requestLevel?.toInt()?.let { req.requestLevel = it }
-        locMode?.toInt()?.let { req.locMode = it }
+        locMode?.let {
+            if (it != TencentLocationRequest.HIGH_ACCURACY_MODE.toLong() &&
+                it != TencentLocationRequest.ONLY_NETWORK_MODE.toLong() &&
+                it != TencentLocationRequest.ONLY_GPS_MODE.toLong()) {
+                throw FlutterError("invalid-argument", "locMode 必须为 10、11 或 12")
+            }
+            req.locMode = it.toInt()
+        }
         allowGps?.let { req.isAllowGPS = it }
         allowCache?.let { req.isAllowCache = it }
         gpsFirst?.let { req.isGpsFirst = it }

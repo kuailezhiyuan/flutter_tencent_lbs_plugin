@@ -1,6 +1,7 @@
 import Flutter
 import UIKit
 import TencentLBS
+import CoreLocation
 
 /// Pigeon Host API 实现（Swift 协议），与腾讯定位 SDK 文档对齐。
 /// 坐标系：Flutter 统一 0=GCJ02, 1=WGS84 → iOS TencentLBSLocationCoordinateTypeGCJ02=0, WGS84=1
@@ -8,17 +9,20 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
     private var locationManager: TencentLBSLocationManager?
     private var flutterApi: TencentLBSFlutterApi?
     private var isListenLocationUpdates = false
+    private var callbackThrottle = LocationCallbackThrottle()
 
     override init() {
         super.init()
     }
 
     func configure(options: InitOptions) throws -> Bool {
+        let accuracy = try desiredAccuracy(locMode: options.locMode, explicitAccuracy: nil)
         let manager = TencentLBSLocationManager()
         manager.delegate = self
         manager.apiKey = options.apiKey
         // enableAntiMockLocation：开启反作弊检查。mockEnable=true 表示允许 Mock，故应关闭反作弊。
         manager.enableAntiMockLocation = !(options.mockEnable ?? false)
+        if let accuracy { manager.desiredAccuracy = accuracy }
 
         if let ct = options.coordinateType {
             manager.coordinateType = ct == 0 ? .GCJ02 : .WGS84
@@ -56,16 +60,25 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
     }
 
     func startLocationUpdates(request: ContinuousLocationRequest, androidNotificationOptions: AndroidNotificationOptions?) throws {
-        guard let manager = locationManager, !isListenLocationUpdates else { return }
+        guard let manager = locationManager, !isListenLocationUpdates else {
+            return
+        }
         guard request.intervalMs >= 1000 else {
             throw PigeonError(code: "invalid-argument", message: "intervalMs 必须大于等于 1000，当前值: \(request.intervalMs)", details: nil)
         }
+        let accuracy = try desiredAccuracy(locMode: request.locMode, explicitAccuracy: request.iosDesiredAccuracy)
+        try validateDistanceFilter(request.iosDistanceFilter)
+
+        if let accuracy { manager.desiredAccuracy = accuracy }
+        if let distance = request.iosDistanceFilter { manager.distanceFilter = distance }
+        callbackThrottle.updateInterval(milliseconds: request.intervalMs)
+        callbackThrottle.reset()
         isListenLocationUpdates = true
-        manager.locationCallbackInterval = UInt64(request.intervalMs)
-        if request.backgroundLocation == true {
-            manager.allowsBackgroundLocationUpdates = true
-            manager.pausesLocationUpdatesAutomatically = false
-        }
+        // The SDK's nonzero interval uses a timer configured at start. Receive
+        // fresh callbacks instead, so interval changes never require a restart.
+        manager.locationCallbackInterval = 0
+        manager.allowsBackgroundLocationUpdates = request.backgroundLocation == true
+        manager.pausesLocationUpdatesAutomatically = false
         if let rl = request.requestLevel {
             let level: TencentLBSRequestLevel = {
                 switch rl {
@@ -82,15 +95,22 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
     }
 
     func updateLocationRequest(update: LocationRequestUpdate?) throws {
-        guard let manager = locationManager, let update = update, isListenLocationUpdates else { return }
-        var needRestart = false
+        guard let update else { return }
+        guard let manager = locationManager, isListenLocationUpdates else {
+            throw PigeonError(code: "not-started", message: "请先开启连续定位", details: nil)
+        }
         if let interval = update.intervalMs {
             guard interval >= 1000 else {
                 throw PigeonError(code: "invalid-argument", message: "intervalMs 必须大于等于 1000，当前值: \(interval)", details: nil)
             }
-            manager.locationCallbackInterval = UInt64(interval)
-            needRestart = true
         }
+        // Validate every field before touching the active manager.
+        let accuracy = try desiredAccuracy(locMode: update.locMode, explicitAccuracy: update.iosDesiredAccuracy)
+        try validateDistanceFilter(update.iosDistanceFilter)
+
+        if let accuracy { manager.desiredAccuracy = accuracy }
+        if let distance = update.iosDistanceFilter { manager.distanceFilter = distance }
+        if let interval = update.intervalMs { callbackThrottle.updateInterval(milliseconds: interval) }
         if let rl = update.requestLevel {
             let level: TencentLBSRequestLevel = {
                 switch rl {
@@ -102,42 +122,39 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
                 }
             }()
             manager.requestLevel = level
-            needRestart = true
         }
-        // iOS 上修改 locationCallbackInterval / requestLevel 后需重启定位才会生效。
-        // 在后台时用 background task 保护，避免 stop 与 start 之间被系统挂起导致定位未重新开启。
-        if needRestart {
-            let isBackground = UIApplication.shared.applicationState == .background
-            var taskId: UIBackgroundTaskIdentifier = .invalid
-            if isBackground {
-                taskId = UIApplication.shared.beginBackgroundTask(withName: "TencentLBSRestart") {
-                    if Self._restartTaskId != .invalid {
-                        UIApplication.shared.endBackgroundTask(Self._restartTaskId)
-                        Self._restartTaskId = .invalid
-                    }
-                }
-                Self._restartTaskId = taskId
-            }
-
-            manager.stopUpdatingLocation()
-            manager.startUpdatingLocation()
-
-            if isBackground, taskId != .invalid {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    if Self._restartTaskId != .invalid {
-                        UIApplication.shared.endBackgroundTask(Self._restartTaskId)
-                        Self._restartTaskId = .invalid
-                    }
-                }
-            }
-        }
+        // Keep the existing location session and its background authorization.
     }
 
-    private static var _restartTaskId: UIBackgroundTaskIdentifier = .invalid
+    private func desiredAccuracy(locMode: Int64?, explicitAccuracy: Double?) throws -> CLLocationAccuracy? {
+        let modeAccuracy: CLLocationAccuracy?
+        switch locMode {
+        case nil: modeAccuracy = nil
+        case 10: modeAccuracy = kCLLocationAccuracyBest
+        case 11: modeAccuracy = kCLLocationAccuracyHundredMeters
+        case 12:
+            throw PigeonError(code: "unsupported-mode", message: "iOS 不支持仅 GPS 定位；请使用高精度或低功耗模式", details: nil)
+        default:
+            throw PigeonError(code: "invalid-argument", message: "locMode 必须为 10、11 或 12", details: nil)
+        }
+        if let accuracy = explicitAccuracy,
+           !accuracy.isFinite || !(accuracy > 0 || accuracy == kCLLocationAccuracyBest || accuracy == kCLLocationAccuracyBestForNavigation) {
+            throw PigeonError(code: "invalid-argument", message: "iosDesiredAccuracy 必须为正数、-1 或 -2", details: nil)
+        }
+        return explicitAccuracy ?? modeAccuracy
+    }
+
+    private func validateDistanceFilter(_ distance: Double?) throws {
+        if let distance,
+           !distance.isFinite || !(distance >= 0 || distance == kCLDistanceFilterNone) {
+            throw PigeonError(code: "invalid-argument", message: "iosDistanceFilter 必须为非负数或 -1", details: nil)
+        }
+    }
 
     func stopLocationUpdates() throws {
         isListenLocationUpdates = false
         locationManager?.stopUpdatingLocation()
+        callbackThrottle.reset()
     }
 
     func setBinaryMessenger(_ messenger: FlutterBinaryMessenger) {
@@ -146,6 +163,8 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
 
     // MARK: - TencentLBSLocationManagerDelegate
     func tencentLBSLocationManager(_ manager: TencentLBSLocationManager, didUpdate location: TencentLBSLocation) {
+        guard isListenLocationUpdates,
+              callbackThrottle.shouldDeliver(at: ProcessInfo.processInfo.systemUptime) else { return }
         sendLocationToFlutter(location)
     }
 

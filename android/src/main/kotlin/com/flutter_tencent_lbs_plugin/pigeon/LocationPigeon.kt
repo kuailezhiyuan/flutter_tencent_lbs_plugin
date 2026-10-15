@@ -63,7 +63,7 @@ data class InitOptions (
   val mockEnable: Boolean? = null,
   /** 定位结果信息级别。不同 level 结果信息完整程度不同，信息越多消耗流量越多。Android: TencentLocationRequest.setRequestLevel。0=仅经纬度，1=经纬度+位置名称+地址，3=经纬度+行政区划+地址+名称，4=经纬度+行政区划+附近POI。 */
   val requestLevel: Long? = null,
-  /** 定位模式（仅 Android）。TencentLocationRequest.setLocMode。10=高精度(网络+卫星)，11=仅网络(不启GPS、省电、精度降低)，12=仅GPS(室外约3-10米，首次较慢耗电高，超时8s无GPS则返回网络)。iOS 无此参数，传参在 iOS 端忽略。 */
+  /** 定位模式。Android: TencentLocationRequest.setLocMode，10=高精度、11=仅网络、12=仅GPS。iOS: 10=Best、11=HundredMeters，12 不支持。 */
   val locMode: Long? = null,
   /** 是否允许使用 GPS（仅 Android）。TencentLocationRequest.setAllowGPS，默认允许。允许时室外可提升精度约3-10米，首次较慢耗电较高。仅对高精度定位模式生效。 */
   val allowGps: Boolean? = null,
@@ -114,7 +114,7 @@ data class ContinuousLocationRequest (
   val intervalMs: Long,
   /** 定位结果信息级别，同 InitOptions.requestLevel。不传则使用 init 时的值。 */
   val requestLevel: Long? = null,
-  /** 定位模式（仅 Android），同 InitOptions.locMode。 */
+  /** 双端定位模式，同 InitOptions.locMode。 */
   val locMode: Long? = null,
   /** 是否允许使用 GPS（仅 Android），同 InitOptions.allowGps。 */
   val allowGps: Boolean? = null,
@@ -125,7 +125,11 @@ data class ContinuousLocationRequest (
   /** 卫星优先超时时间 ms（仅 Android），同 InitOptions.gpsFirstTimeOutMs。 */
   val gpsFirstTimeOutMs: Long? = null,
   /** 是否后台定位。为 true 时 Android 需配合前台通知（enableForegroundLocation）；iOS 需配置后台定位能力。 */
-  val backgroundLocation: Boolean? = null
+  val backgroundLocation: Boolean? = null,
+  /** iOS desiredAccuracy，单位米；-1=Best、-2=BestForNavigation，或正数。覆盖 locMode 默认精度。 */
+  val iosDesiredAccuracy: Double? = null,
+  /** iOS distanceFilter，单位米；-1=不进行距离过滤，或非负数。 */
+  val iosDistanceFilter: Double? = null
 )
  {
   companion object {
@@ -138,7 +142,9 @@ data class ContinuousLocationRequest (
       val gpsFirst = pigeonVar_list[5] as Boolean?
       val gpsFirstTimeOutMs = pigeonVar_list[6] as Long?
       val backgroundLocation = pigeonVar_list[7] as Boolean?
-      return ContinuousLocationRequest(intervalMs, requestLevel, locMode, allowGps, allowCache, gpsFirst, gpsFirstTimeOutMs, backgroundLocation)
+      val iosDesiredAccuracy = pigeonVar_list[8] as Double?
+      val iosDistanceFilter = pigeonVar_list[9] as Double?
+      return ContinuousLocationRequest(intervalMs, requestLevel, locMode, allowGps, allowCache, gpsFirst, gpsFirstTimeOutMs, backgroundLocation, iosDesiredAccuracy, iosDistanceFilter)
     }
   }
   fun toList(): List<Any?> {
@@ -151,12 +157,14 @@ data class ContinuousLocationRequest (
       gpsFirst,
       gpsFirstTimeOutMs,
       backgroundLocation,
+      iosDesiredAccuracy,
+      iosDistanceFilter,
     )
   }
 }
 
 /**
- * 连续定位过程中可更新的参数，仅传需要修改的字段。Android：间隔可通过 changeCallbackInterval 修改，其它需重新 requestLocationUpdates；iOS：可动态修改 locationCallbackInterval、requestLevel 等。
+ * 连续定位过程中可更新的参数，仅传需要修改的字段。Android 使用 changeCallbackInterval 或再次 requestLocationUpdates，不先 removeUpdates；iOS 原地修改精度、距离和信息级别，间隔由插件节流新回调。
  *
  * Generated class from Pigeon that represents data sent in messages.
  */
@@ -167,7 +175,9 @@ data class LocationRequestUpdate (
   val gpsFirstTimeOutMs: Long? = null,
   val allowGps: Boolean? = null,
   val allowCache: Boolean? = null,
-  val gpsFirst: Boolean? = null
+  val gpsFirst: Boolean? = null,
+  val iosDesiredAccuracy: Double? = null,
+  val iosDistanceFilter: Double? = null
 )
  {
   companion object {
@@ -179,7 +189,9 @@ data class LocationRequestUpdate (
       val allowGps = pigeonVar_list[4] as Boolean?
       val allowCache = pigeonVar_list[5] as Boolean?
       val gpsFirst = pigeonVar_list[6] as Boolean?
-      return LocationRequestUpdate(intervalMs, requestLevel, locMode, gpsFirstTimeOutMs, allowGps, allowCache, gpsFirst)
+      val iosDesiredAccuracy = pigeonVar_list[7] as Double?
+      val iosDistanceFilter = pigeonVar_list[8] as Double?
+      return LocationRequestUpdate(intervalMs, requestLevel, locMode, gpsFirstTimeOutMs, allowGps, allowCache, gpsFirst, iosDesiredAccuracy, iosDistanceFilter)
     }
   }
   fun toList(): List<Any?> {
@@ -191,6 +203,8 @@ data class LocationRequestUpdate (
       allowGps,
       allowCache,
       gpsFirst,
+      iosDesiredAccuracy,
+      iosDistanceFilter,
     )
   }
 }

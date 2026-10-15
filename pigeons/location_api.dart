@@ -6,21 +6,23 @@ import 'package:pigeon/pigeon.dart';
 //         TencentLocationRequest, TencentLocation, TencentLocationManagerOptions
 // iOS:    https://mapapi.qq.com/sdk/locationSDK/iOS/doc/appledoc/html/index.html
 
-@ConfigurePigeon(PigeonOptions(
-  dartOut: 'lib/src/pigeon/location_pigeon.dart',
-  kotlinOut: 'android/src/main/kotlin/com/flutter_tencent_lbs_plugin/pigeon/LocationPigeon.kt',
-  kotlinOptions: KotlinOptions(
-    package: 'com.flutter_tencent_lbs_plugin.pigeon',
+@ConfigurePigeon(
+  PigeonOptions(
+    dartOut: 'lib/src/pigeon/location_pigeon.dart',
+    kotlinOut:
+        'android/src/main/kotlin/com/flutter_tencent_lbs_plugin/pigeon/LocationPigeon.kt',
+    kotlinOptions: KotlinOptions(
+      package: 'com.flutter_tencent_lbs_plugin.pigeon',
+    ),
+    swiftOut:
+        'ios/flutter_tencent_lbs_plugin/Sources/flutter_tencent_lbs_plugin/pigeon/LocationPigeon.swift',
+    swiftOptions: SwiftOptions(),
   ),
-  swiftOut: 'ios/flutter_tencent_lbs_plugin/Sources/flutter_tencent_lbs_plugin/pigeon/LocationPigeon.swift',
-  swiftOptions: SwiftOptions(),
-))
-
+)
 // ========== 常量对照（SDK 文档） ==========
 // coordinateType: 0=GCJ02 火星坐标，1=WGS84 地球坐标（Android TencentLocationManager / iOS TencentLBSLocationCoordinateType）
 // requestLevel:  0=GEO 仅经纬度，1=NAME 经纬度+名称+地址，3=ADMIN_AREA 经纬度+行政区划+地址+名称，4=POI 经纬度+行政区划+附近POI（Android TencentLocationRequest）
 // locMode(Android): 10=HIGH_ACCURACY_MODE 高精度，11=ONLY_NETWORK_MODE 仅网络，12=ONLY_GPS_MODE 仅GPS
-
 /// 初始化参数。对应 Android TencentLocationManagerOptions + TencentLocationManager + TencentLocationRequest 的初始设置；iOS TencentLBSLocationManager 的 apiKey、coordinateType、requestLevel 等。
 class InitOptions {
   /// 腾讯开放平台申请的 Key。Android: TencentLocationManagerOptions.setKey；iOS: apiKey。
@@ -35,7 +37,7 @@ class InitOptions {
   /// 定位结果信息级别。不同 level 结果信息完整程度不同，信息越多消耗流量越多。Android: TencentLocationRequest.setRequestLevel。0=仅经纬度，1=经纬度+位置名称+地址，3=经纬度+行政区划+地址+名称，4=经纬度+行政区划+附近POI。
   int? requestLevel;
 
-  /// 定位模式（仅 Android）。TencentLocationRequest.setLocMode。10=高精度(网络+卫星)，11=仅网络(不启GPS、省电、精度降低)，12=仅GPS(室外约3-10米，首次较慢耗电高，超时8s无GPS则返回网络)。iOS 无此参数，传参在 iOS 端忽略。
+  /// 定位模式。Android: TencentLocationRequest.setLocMode，10=高精度、11=仅网络、12=仅GPS。iOS: 10=Best、11=HundredMeters，12 不支持。
   int? locMode;
 
   /// 是否允许使用 GPS（仅 Android）。TencentLocationRequest.setAllowGPS，默认允许。允许时室外可提升精度约3-10米，首次较慢耗电较高。仅对高精度定位模式生效。
@@ -71,7 +73,7 @@ class ContinuousLocationRequest {
   /// 定位结果信息级别，同 InitOptions.requestLevel。不传则使用 init 时的值。
   int? requestLevel;
 
-  /// 定位模式（仅 Android），同 InitOptions.locMode。
+  /// 双端定位模式，同 InitOptions.locMode。
   int? locMode;
 
   /// 是否允许使用 GPS（仅 Android），同 InitOptions.allowGps。
@@ -89,6 +91,12 @@ class ContinuousLocationRequest {
   /// 是否后台定位。为 true 时 Android 需配合前台通知（enableForegroundLocation）；iOS 需配置后台定位能力。
   bool? backgroundLocation;
 
+  /// iOS desiredAccuracy，单位米；-1=Best、-2=BestForNavigation，或正数。覆盖 locMode 默认精度。
+  double? iosDesiredAccuracy;
+
+  /// iOS distanceFilter，单位米；-1=不进行距离过滤，或非负数。
+  double? iosDistanceFilter;
+
   ContinuousLocationRequest({
     required this.intervalMs,
     this.requestLevel,
@@ -98,10 +106,12 @@ class ContinuousLocationRequest {
     this.gpsFirst,
     this.gpsFirstTimeOutMs,
     this.backgroundLocation,
+    this.iosDesiredAccuracy,
+    this.iosDistanceFilter,
   });
 }
 
-/// 连续定位过程中可更新的参数，仅传需要修改的字段。Android：间隔可通过 changeCallbackInterval 修改，其它需重新 requestLocationUpdates；iOS：可动态修改 locationCallbackInterval、requestLevel 等。
+/// 连续定位过程中可更新的参数，仅传需要修改的字段。Android 使用 changeCallbackInterval 或再次 requestLocationUpdates，不先 removeUpdates；iOS 原地修改精度、距离和信息级别，间隔由插件节流新回调。
 class LocationRequestUpdate {
   int? intervalMs;
   int? requestLevel;
@@ -110,6 +120,8 @@ class LocationRequestUpdate {
   bool? allowGps;
   bool? allowCache;
   bool? gpsFirst;
+  double? iosDesiredAccuracy;
+  double? iosDistanceFilter;
   LocationRequestUpdate({
     this.intervalMs,
     this.requestLevel,
@@ -118,6 +130,8 @@ class LocationRequestUpdate {
     this.allowGps,
     this.allowCache,
     this.gpsFirst,
+    this.iosDesiredAccuracy,
+    this.iosDistanceFilter,
   });
 }
 
@@ -125,20 +139,28 @@ class LocationRequestUpdate {
 class AndroidNotificationOptions {
   /// 前台定位通知 ID，用于 enableForegroundLocation(id, notification)。
   int id;
+
   /// 通知渠道 ID（Android NotificationChannel）。
   String channelId;
+
   /// 通知渠道名称。
   String channelName;
+
   /// 通知渠道描述（可选）。
   String? channelDescription;
+
   /// 通知标题。
   String notificationTitle;
+
   /// 通知内容（可选）。
   String? notificationText;
+
   /// 是否振动。
   bool? enableVibration;
+
   /// 是否播放声音。
   bool? playSound;
+
   /// 是否显示时间。
   bool? showWhen;
   AndroidNotificationOptions({
@@ -231,14 +253,22 @@ class LocationStatusData {
 abstract class TencentLBSHostApi {
   /// SDK 初始化（方法名避免 Swift 保留字 init）。Android: TencentLocationManagerOptions.setKey + TencentLocationManager 实例及 Request 配置；iOS: TencentLBSLocationManager 配置。
   bool configure(InitOptions options);
+
   /// 设置用户是否同意隐私政策，调用其他接口前必须调用。对应 SDK setUserAgreePrivacy。
   void setUserAgreePrivacy(bool agree);
+
   /// 单次定位。Android: requestSingleFreshLocation；iOS: requestLocation。
   void requestLocationOnce();
+
   /// 发起连续定位。Android: requestLocationUpdates；iOS: startUpdatingLocation。androidNotificationOptions 仅 Android 后台定位时用于构建前台通知。
-  void startLocationUpdates(ContinuousLocationRequest request, AndroidNotificationOptions? androidNotificationOptions);
+  void startLocationUpdates(
+    ContinuousLocationRequest request,
+    AndroidNotificationOptions? androidNotificationOptions,
+  );
+
   /// 连续定位开启后可调用，更新部分参数（如定位间隔、requestLevel 等）。Android 间隔可通过 changeCallbackInterval 修改。
   void updateLocationRequest(LocationRequestUpdate? update);
+
   /// 停止连续定位。Android: removeUpdates；iOS: stopUpdatingLocation。
   void stopLocationUpdates();
 }

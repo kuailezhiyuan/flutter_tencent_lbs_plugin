@@ -51,7 +51,7 @@ class InitOptions {
   /// 定位结果信息级别。不同 level 结果信息完整程度不同，信息越多消耗流量越多。Android: TencentLocationRequest.setRequestLevel。0=仅经纬度，1=经纬度+位置名称+地址，3=经纬度+行政区划+地址+名称，4=经纬度+行政区划+附近POI。
   int? requestLevel;
 
-  /// 定位模式（仅 Android）。TencentLocationRequest.setLocMode。10=高精度(网络+卫星)，11=仅网络(不启GPS、省电、精度降低)，12=仅GPS(室外约3-10米，首次较慢耗电高，超时8s无GPS则返回网络)。iOS 无此参数，传参在 iOS 端忽略。
+  /// 定位模式。Android: TencentLocationRequest.setLocMode，10=高精度、11=仅网络、12=仅GPS。iOS: 10=Best、11=HundredMeters，12 不支持。
   int? locMode;
 
   /// 是否允许使用 GPS（仅 Android）。TencentLocationRequest.setAllowGPS，默认允许。允许时室外可提升精度约3-10米，首次较慢耗电较高。仅对高精度定位模式生效。
@@ -107,6 +107,8 @@ class ContinuousLocationRequest {
     this.gpsFirst,
     this.gpsFirstTimeOutMs,
     this.backgroundLocation,
+    this.iosDesiredAccuracy,
+    this.iosDistanceFilter,
   });
 
   /// 定位周期（位置监听器回调周期），单位 ms。Android: TencentLocationRequest.setInterval。大于 0 时按周期定时回调；等于 0 时仅当有新的定位结果时回调。文档建议 5000-10000ms，不建议 1000ms 以下，且不得小于 1000ms。
@@ -115,7 +117,7 @@ class ContinuousLocationRequest {
   /// 定位结果信息级别，同 InitOptions.requestLevel。不传则使用 init 时的值。
   int? requestLevel;
 
-  /// 定位模式（仅 Android），同 InitOptions.locMode。
+  /// 双端定位模式，同 InitOptions.locMode。
   int? locMode;
 
   /// 是否允许使用 GPS（仅 Android），同 InitOptions.allowGps。
@@ -133,6 +135,12 @@ class ContinuousLocationRequest {
   /// 是否后台定位。为 true 时 Android 需配合前台通知（enableForegroundLocation）；iOS 需配置后台定位能力。
   bool? backgroundLocation;
 
+  /// iOS desiredAccuracy，单位米；-1=Best、-2=BestForNavigation，或正数。覆盖 locMode 默认精度。
+  double? iosDesiredAccuracy;
+
+  /// iOS distanceFilter，单位米；-1=不进行距离过滤，或非负数。
+  double? iosDistanceFilter;
+
   Object encode() {
     return <Object?>[
       intervalMs,
@@ -143,6 +151,8 @@ class ContinuousLocationRequest {
       gpsFirst,
       gpsFirstTimeOutMs,
       backgroundLocation,
+      iosDesiredAccuracy,
+      iosDistanceFilter,
     ];
   }
 
@@ -157,11 +167,13 @@ class ContinuousLocationRequest {
       gpsFirst: result[5] as bool?,
       gpsFirstTimeOutMs: result[6] as int?,
       backgroundLocation: result[7] as bool?,
+      iosDesiredAccuracy: result[8] as double?,
+      iosDistanceFilter: result[9] as double?,
     );
   }
 }
 
-/// 连续定位过程中可更新的参数，仅传需要修改的字段。Android：间隔可通过 changeCallbackInterval 修改，其它需重新 requestLocationUpdates；iOS：可动态修改 locationCallbackInterval、requestLevel 等。
+/// 连续定位过程中可更新的参数，仅传需要修改的字段。Android 使用 changeCallbackInterval 或再次 requestLocationUpdates，不先 removeUpdates；iOS 原地修改精度、距离和信息级别，间隔由插件节流新回调。
 class LocationRequestUpdate {
   LocationRequestUpdate({
     this.intervalMs,
@@ -171,6 +183,8 @@ class LocationRequestUpdate {
     this.allowGps,
     this.allowCache,
     this.gpsFirst,
+    this.iosDesiredAccuracy,
+    this.iosDistanceFilter,
   });
 
   int? intervalMs;
@@ -187,6 +201,10 @@ class LocationRequestUpdate {
 
   bool? gpsFirst;
 
+  double? iosDesiredAccuracy;
+
+  double? iosDistanceFilter;
+
   Object encode() {
     return <Object?>[
       intervalMs,
@@ -196,6 +214,8 @@ class LocationRequestUpdate {
       allowGps,
       allowCache,
       gpsFirst,
+      iosDesiredAccuracy,
+      iosDistanceFilter,
     ];
   }
 
@@ -209,6 +229,8 @@ class LocationRequestUpdate {
       allowGps: result[4] as bool?,
       allowCache: result[5] as bool?,
       gpsFirst: result[6] as bool?,
+      iosDesiredAccuracy: result[7] as double?,
+      iosDistanceFilter: result[8] as double?,
     );
   }
 }

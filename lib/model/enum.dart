@@ -29,17 +29,29 @@ class TencentLBSRequestLevel {
   static const int Poi = 4;
 }
 
-/// 定位模式（与 Android TencentLocationRequest 一致：HIGH_ACCURACY_MODE=10 等）
-/// iOS 无直接对应，传参在 iOS 端忽略
+/// 定位模式。Android 使用 TencentLocationRequest；iOS 使用 desiredAccuracy。
 class TencentLBSLocMode {
-  /// 高精度：网络 + 卫星，优先高精度
+  /// Android：网络 + 卫星；iOS：kCLLocationAccuracyBest。
   static const int HIGH_ACCURACY_MODE = 10;
 
-  /// 仅网络：不启 GPS，省电但精度较低
+  /// Android：仅网络；iOS：百米精度要求，不保证关闭 GPS。
   static const int ONLY_NETWORK_MODE = 11;
 
-  /// 仅 GPS：室外精度约 3–10 米，无 GPS 时超时后回退网络（默认 8s）
+  /// 双端低功耗模式。与 ONLY_NETWORK_MODE 使用相同的值。
+  static const int LOW_POWER_MODE = ONLY_NETWORK_MODE;
+
+  /// 仅 Android 支持。iOS 无法指定只使用 GPS，会返回 unsupported-mode。
   static const int ONLY_GPS_MODE = 12;
+}
+
+/// iOS desiredAccuracy 的常用值，单位米。精度是请求目标，不是结果保证。
+class TencentLBSIosAccuracy {
+  static const double bestForNavigation = -2;
+  static const double best = -1;
+  static const double nearestTenMeters = 10;
+  static const double hundredMeters = 100;
+  static const double kilometer = 1000;
+  static const double threeKilometers = 3000;
 }
 
 /// 定位来源（双端统一）

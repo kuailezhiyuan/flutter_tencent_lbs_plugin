@@ -80,7 +80,7 @@ struct InitOptions {
   var mockEnable: Bool? = nil
   /// 定位结果信息级别。不同 level 结果信息完整程度不同，信息越多消耗流量越多。Android: TencentLocationRequest.setRequestLevel。0=仅经纬度，1=经纬度+位置名称+地址，3=经纬度+行政区划+地址+名称，4=经纬度+行政区划+附近POI。
   var requestLevel: Int64? = nil
-  /// 定位模式（仅 Android）。TencentLocationRequest.setLocMode。10=高精度(网络+卫星)，11=仅网络(不启GPS、省电、精度降低)，12=仅GPS(室外约3-10米，首次较慢耗电高，超时8s无GPS则返回网络)。iOS 无此参数，传参在 iOS 端忽略。
+  /// 定位模式。Android: TencentLocationRequest.setLocMode，10=高精度、11=仅网络、12=仅GPS。iOS: 10=Best、11=HundredMeters，12 不支持。
   var locMode: Int64? = nil
   /// 是否允许使用 GPS（仅 Android）。TencentLocationRequest.setAllowGPS，默认允许。允许时室外可提升精度约3-10米，首次较慢耗电较高。仅对高精度定位模式生效。
   var allowGps: Bool? = nil
@@ -139,7 +139,7 @@ struct ContinuousLocationRequest {
   var intervalMs: Int64
   /// 定位结果信息级别，同 InitOptions.requestLevel。不传则使用 init 时的值。
   var requestLevel: Int64? = nil
-  /// 定位模式（仅 Android），同 InitOptions.locMode。
+  /// 双端定位模式，同 InitOptions.locMode。
   var locMode: Int64? = nil
   /// 是否允许使用 GPS（仅 Android），同 InitOptions.allowGps。
   var allowGps: Bool? = nil
@@ -151,6 +151,10 @@ struct ContinuousLocationRequest {
   var gpsFirstTimeOutMs: Int64? = nil
   /// 是否后台定位。为 true 时 Android 需配合前台通知（enableForegroundLocation）；iOS 需配置后台定位能力。
   var backgroundLocation: Bool? = nil
+  /// iOS desiredAccuracy，单位米；-1=Best、-2=BestForNavigation，或正数。覆盖 locMode 默认精度。
+  var iosDesiredAccuracy: Double? = nil
+  /// iOS distanceFilter，单位米；-1=不进行距离过滤，或非负数。
+  var iosDistanceFilter: Double? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -163,6 +167,8 @@ struct ContinuousLocationRequest {
     let gpsFirst: Bool? = nilOrValue(pigeonVar_list[5])
     let gpsFirstTimeOutMs: Int64? = nilOrValue(pigeonVar_list[6])
     let backgroundLocation: Bool? = nilOrValue(pigeonVar_list[7])
+    let iosDesiredAccuracy: Double? = nilOrValue(pigeonVar_list[8])
+    let iosDistanceFilter: Double? = nilOrValue(pigeonVar_list[9])
 
     return ContinuousLocationRequest(
       intervalMs: intervalMs,
@@ -172,7 +178,9 @@ struct ContinuousLocationRequest {
       allowCache: allowCache,
       gpsFirst: gpsFirst,
       gpsFirstTimeOutMs: gpsFirstTimeOutMs,
-      backgroundLocation: backgroundLocation
+      backgroundLocation: backgroundLocation,
+      iosDesiredAccuracy: iosDesiredAccuracy,
+      iosDistanceFilter: iosDistanceFilter
     )
   }
   func toList() -> [Any?] {
@@ -185,11 +193,13 @@ struct ContinuousLocationRequest {
       gpsFirst,
       gpsFirstTimeOutMs,
       backgroundLocation,
+      iosDesiredAccuracy,
+      iosDistanceFilter,
     ]
   }
 }
 
-/// 连续定位过程中可更新的参数，仅传需要修改的字段。Android：间隔可通过 changeCallbackInterval 修改，其它需重新 requestLocationUpdates；iOS：可动态修改 locationCallbackInterval、requestLevel 等。
+/// 连续定位过程中可更新的参数，仅传需要修改的字段。Android 使用 changeCallbackInterval 或再次 requestLocationUpdates，不先 removeUpdates；iOS 原地修改精度、距离和信息级别，间隔由插件节流新回调。
 ///
 /// Generated class from Pigeon that represents data sent in messages.
 struct LocationRequestUpdate {
@@ -200,6 +210,8 @@ struct LocationRequestUpdate {
   var allowGps: Bool? = nil
   var allowCache: Bool? = nil
   var gpsFirst: Bool? = nil
+  var iosDesiredAccuracy: Double? = nil
+  var iosDistanceFilter: Double? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -211,6 +223,8 @@ struct LocationRequestUpdate {
     let allowGps: Bool? = nilOrValue(pigeonVar_list[4])
     let allowCache: Bool? = nilOrValue(pigeonVar_list[5])
     let gpsFirst: Bool? = nilOrValue(pigeonVar_list[6])
+    let iosDesiredAccuracy: Double? = nilOrValue(pigeonVar_list[7])
+    let iosDistanceFilter: Double? = nilOrValue(pigeonVar_list[8])
 
     return LocationRequestUpdate(
       intervalMs: intervalMs,
@@ -219,7 +233,9 @@ struct LocationRequestUpdate {
       gpsFirstTimeOutMs: gpsFirstTimeOutMs,
       allowGps: allowGps,
       allowCache: allowCache,
-      gpsFirst: gpsFirst
+      gpsFirst: gpsFirst,
+      iosDesiredAccuracy: iosDesiredAccuracy,
+      iosDistanceFilter: iosDistanceFilter
     )
   }
   func toList() -> [Any?] {
@@ -231,6 +247,8 @@ struct LocationRequestUpdate {
       allowGps,
       allowCache,
       gpsFirst,
+      iosDesiredAccuracy,
+      iosDistanceFilter,
     ]
   }
 }

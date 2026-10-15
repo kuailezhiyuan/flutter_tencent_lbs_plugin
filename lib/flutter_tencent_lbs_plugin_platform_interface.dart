@@ -22,6 +22,13 @@ abstract class FlutterTencentLBSPluginPlatform extends PlatformInterface {
 
   LocationState state = LocationState();
 
+  Future<void> setDebugLogging({
+    required bool enabled,
+    void Function(String message)? onLog,
+  }) {
+    throw UnimplementedError('setDebugLogging() has not been implemented.');
+  }
+
   Future<bool> init({
     required String key,
     int? coordinateType,
@@ -54,6 +61,8 @@ abstract class FlutterTencentLBSPluginPlatform extends PlatformInterface {
     bool? allowCache,
     bool? gpsFirst,
     int? gpsFirstTimeOutMs,
+    double? iosDesiredAccuracy,
+    double? iosDistanceFilter,
   }) {
     throw UnimplementedError('getLocation() has not been implemented.');
   }
@@ -67,8 +76,12 @@ abstract class FlutterTencentLBSPluginPlatform extends PlatformInterface {
     bool? allowGps,
     bool? allowCache,
     bool? gpsFirst,
+    double? iosDesiredAccuracy,
+    double? iosDistanceFilter,
   }) {
-    throw UnimplementedError('updateLocationRequest() has not been implemented.');
+    throw UnimplementedError(
+      'updateLocationRequest() has not been implemented.',
+    );
   }
 
   Future<Location?> getLocationOnce() {
@@ -77,6 +90,7 @@ abstract class FlutterTencentLBSPluginPlatform extends PlatformInterface {
 }
 
 /// 占位实现，仅用于默认 instance；实际使用前会被替换为 Pigeon 实现。
-class _StubFlutterTencentLBSPluginPlatform extends FlutterTencentLBSPluginPlatform {
+class _StubFlutterTencentLBSPluginPlatform
+    extends FlutterTencentLBSPluginPlatform {
   _StubFlutterTencentLBSPluginPlatform() : super();
 }
