@@ -91,7 +91,9 @@ class FlutterTencentLBSPlugin {
 
   /// 发起单次定位请求。
   ///
-  /// 成功返回 [Location]；失败或超时返回 `null`。
+  /// 成功返回 [Location]；SDK 定位失败或 30 秒超时返回 `null`。
+  /// 未初始化、并发单次请求或平台通信异常会抛出异常，之后可重试。
+  /// 单次结果不进入连续定位监听器。
   Future<Location?> getLocationOnce() async {
     return await FlutterTencentLBSPluginPlatform.instance.getLocationOnce();
   }

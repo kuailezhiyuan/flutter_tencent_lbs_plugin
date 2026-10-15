@@ -20,7 +20,7 @@ class FlutterTencentLBSPluginPigeonPlatform
 
   late final pigeon.TencentLBSHostApi _hostApi;
   late final _PigeonFlutterApi _flutterApi;
-  Completer<Location?>? _onceCompleter;
+  bool _onceInFlight = false;
   bool _initialized = false;
   void Function(String message)? _logSink;
 
@@ -95,19 +95,20 @@ class FlutterTencentLBSPluginPigeonPlatform
     if (!_initialized) {
       throw StateError('请先调用 init() 完成初始化');
     }
-    if (_onceCompleter != null && !_onceCompleter!.isCompleted) {
+    if (_onceInFlight) {
       throw StateError('上一次 getLocationOnce() 仍在进行中，请等待结果后重试');
     }
-    final completer = Completer<Location?>();
-    _onceCompleter = completer;
-    await _hostApi.requestLocationOnce();
-    return completer.future.timeout(
-      const Duration(seconds: 30),
-      onTimeout: () {
-        _onceCompleter = null;
-        return null;
-      },
-    );
+    _onceInFlight = true;
+    try {
+      // Each request owns its reply, including replies arriving after timeout.
+      final data = await _hostApi.requestLocationOnce().timeout(
+        const Duration(seconds: 30),
+        onTimeout: () => null,
+      );
+      return data == null || data.code != 0 ? null : _toLocation(data);
+    } finally {
+      _onceInFlight = false;
+    }
   }
 
   @override
@@ -218,15 +219,6 @@ class FlutterTencentLBSPluginPigeonPlatform
 
   void _onLocation(pigeon.LocationData data) {
     final loc = _toLocation(data);
-    if (_onceCompleter != null && !_onceCompleter!.isCompleted) {
-      if ((data.code ?? 1) == 0) {
-        _onceCompleter!.complete(loc);
-      } else {
-        _onceCompleter!.complete(null);
-      }
-      _onceCompleter = null;
-      return;
-    }
     final listeners = state.listener.toList(growable: false);
     for (final listener in listeners) {
       listener(loc);
@@ -241,11 +233,6 @@ class FlutterTencentLBSPluginPigeonPlatform
 
   void _onError(int code, String message) {
     final loc = Location()..code = code;
-    if (_onceCompleter != null && !_onceCompleter!.isCompleted) {
-      _onceCompleter!.complete(null);
-      _onceCompleter = null;
-      return;
-    }
     final failListeners = state.failListener.toList(growable: false);
     for (final listener in failListeners) {
       listener(loc);
@@ -266,7 +253,7 @@ class FlutterTencentLBSPluginPigeonPlatform
 
   static Location _toLocation(pigeon.LocationData data) {
     final loc = Location();
-    loc.code = data.code ?? 0;
+    loc.code = data.code ?? 1;
     loc.latitude = data.latitude;
     loc.longitude = data.longitude;
     loc.altitude = data.altitude;
@@ -287,17 +274,17 @@ class _PigeonFlutterApi extends pigeon.TencentLBSFlutterApi {
   final FlutterTencentLBSPluginPigeonPlatform _platform;
 
   @override
-  void onLocation(pigeon.LocationData location) {
+  Future<void> onLocation(pigeon.LocationData location) async {
     _platform._onLocation(location);
   }
 
   @override
-  void onError(int code, String message) {
+  Future<void> onError(int code, String message) async {
     _platform._onError(code, message);
   }
 
   @override
-  void onStatus(pigeon.LocationStatusData? status) {
+  Future<void> onStatus(pigeon.LocationStatusData? status) async {
     _platform._onStatus(status);
   }
 }

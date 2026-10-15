@@ -10,12 +10,20 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
     private var flutterApi: TencentLBSFlutterApi?
     private var isListenLocationUpdates = false
     private var callbackThrottle = LocationCallbackThrottle()
+    private var disposed = false
+    private var singleRequests: [UUID: (Result<LocationData?, Error>) -> Void] = [:]
 
     override init() {
         super.init()
     }
 
     func configure(options: InitOptions) throws -> Bool {
+        guard !disposed else {
+            throw PigeonError(code: "disposed", message: "定位插件已释放", details: nil)
+        }
+        guard !isListenLocationUpdates, singleRequests.isEmpty else {
+            throw PigeonError(code: "in-progress", message: "定位进行中，不能重新初始化", details: nil)
+        }
         let accuracy = try desiredAccuracy(locMode: options.locMode, explicitAccuracy: nil)
         let manager = TencentLBSLocationManager()
         manager.delegate = self
@@ -47,16 +55,20 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
         TencentLBSLocationManager.setUserAgreePrivacy(agree)
     }
 
-    func requestLocationOnce() throws {
-        locationManager?.requestLocation(completionBlock: { [weak self] location, err in
-            guard let self = self else { return }
-            if let e = err {
-                let code = (e as NSError).code
-                self.flutterApi?.onError(code: Int64(code), message: e.localizedDescription) { _ in }
-            } else if let loc = location {
-                self.sendLocationToFlutter(loc)
-            }
+    func requestLocationOnce(completion: @escaping (Result<LocationData?, Error>) -> Void) {
+        guard let manager = locationManager else {
+            completion(.success(nil))
+            return
+        }
+        let requestID = UUID()
+        singleRequests[requestID] = completion
+        let accepted = manager.requestLocation(completionBlock: { [weak self] location, error in
+            guard let callback = self?.singleRequests.removeValue(forKey: requestID) else { return }
+            callback(.success(error == nil ? location.map { Self.toLocationData($0) } : nil))
         })
+        if !accepted, let callback = singleRequests.removeValue(forKey: requestID) {
+            callback(.success(nil))
+        }
     }
 
     func startLocationUpdates(request: ContinuousLocationRequest, androidNotificationOptions: AndroidNotificationOptions?) throws {
@@ -151,10 +163,23 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
         }
     }
 
-    func stopLocationUpdates() throws {
+    func stopLocationUpdates() {
         isListenLocationUpdates = false
         locationManager?.stopUpdatingLocation()
         callbackThrottle.reset()
+    }
+
+    func dispose() {
+        guard !disposed else { return }
+        disposed = true
+        let pending = Array(singleRequests.values)
+        singleRequests.removeAll()
+        stopLocationUpdates()
+        locationManager?.delegate = nil
+        locationManager?.cancelRequestLocation()
+        locationManager = nil
+        flutterApi = nil
+        for callback in pending { callback(.success(nil)) }
     }
 
     func setBinaryMessenger(_ messenger: FlutterBinaryMessenger) {
@@ -165,7 +190,7 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
     func tencentLBSLocationManager(_ manager: TencentLBSLocationManager, didUpdate location: TencentLBSLocation) {
         guard isListenLocationUpdates,
               callbackThrottle.shouldDeliver(at: ProcessInfo.processInfo.systemUptime) else { return }
-        sendLocationToFlutter(location)
+        flutterApi?.onLocation(location: Self.toLocationData(location)) { _ in }
     }
 
     func tencentLBSLocationManager(_ manager: TencentLBSLocationManager, didFailWithError error: Error) {
@@ -173,7 +198,7 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
         flutterApi?.onError(code: Int64(code), message: error.localizedDescription) { _ in }
     }
 
-    private func sendLocationToFlutter(_ location: TencentLBSLocation) {
+    private static func toLocationData(_ location: TencentLBSLocation) -> LocationData {
         let cl = location.location
         let provider = location.locationProvider
         let unifiedSource = Int64(provider.rawValue)
@@ -188,7 +213,7 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
             @unknown default: return nil
             }
         }()
-        let data = LocationData(
+        return LocationData(
             code: 0,
             latitude: cl.coordinate.latitude,
             longitude: cl.coordinate.longitude,
@@ -205,6 +230,5 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
             sourceProvider: sourceProviderString,
             locationSource: unifiedSource
         )
-        flutterApi?.onLocation(location: data) { _ in }
     }
 }

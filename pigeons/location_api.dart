@@ -1,6 +1,7 @@
 import 'package:pigeon/pigeon.dart';
 
 // 生成命令: dart run pigeon --input pigeons/location_api.dart
+// 格式化命令: dart format lib/src/pigeon/location_pigeon.dart
 // 参数与腾讯定位 SDK 文档对齐，注释仅引用 SDK 文档内容：
 // Android: https://mapapi.qq.com/sdk/locationSDK/Android/doc/com/tencent/map/geolocation/package-summary.html
 //         TencentLocationRequest, TencentLocation, TencentLocationManagerOptions
@@ -257,8 +258,9 @@ abstract class TencentLBSHostApi {
   /// 设置用户是否同意隐私政策，调用其他接口前必须调用。对应 SDK setUserAgreePrivacy。
   void setUserAgreePrivacy(bool agree);
 
-  /// 单次定位。Android: requestSingleFreshLocation；iOS: requestLocation。
-  void requestLocationOnce();
+  /// 单次定位。结果独立返回，不通过连续定位事件发送。Android: requestSingleFreshLocation；iOS: requestLocation。
+  @asyncCallback
+  LocationData? requestLocationOnce();
 
   /// 发起连续定位。Android: requestLocationUpdates；iOS: startUpdatingLocation。androidNotificationOptions 仅 Android 后台定位时用于构建前台通知。
   void startLocationUpdates(
@@ -275,7 +277,10 @@ abstract class TencentLBSHostApi {
 
 @FlutterApi()
 abstract class TencentLBSFlutterApi {
+  @asyncCallback
   void onLocation(LocationData location);
+  @asyncCallback
   void onError(int code, String message);
+  @asyncCallback
   void onStatus(LocationStatusData? status);
 }

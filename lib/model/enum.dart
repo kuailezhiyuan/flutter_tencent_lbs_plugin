@@ -1,3 +1,6 @@
+// Preserve the public SDK constant names.
+// ignore_for_file: constant_identifier_names
+
 // 与腾讯定位 SDK 文档保持一致，避免与原生常量混淆
 // Android: https://mapapi.qq.com/sdk/locationSDK/Android/doc/com/tencent/map/geolocation/package-summary.html
 // iOS: TencentLBSLocationManager.h

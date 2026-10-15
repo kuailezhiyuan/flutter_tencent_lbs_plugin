@@ -2,7 +2,6 @@ package com.flutter_tencent_lbs_plugin.pigeon
 
 import android.content.Context
 import android.os.Looper
-import com.flutter_tencent_lbs_plugin.models.NotificationOptions
 import com.flutter_tencent_lbs_plugin.utils.NotificationUtils
 import com.tencent.map.geolocation.TencentLocation
 import com.tencent.map.geolocation.TencentLocationListener
@@ -22,8 +21,14 @@ class TencentLBSHostApiImpl(
     private var locationManager: TencentLocationManager? = null
     private var tencentLocationRequest: TencentLocationRequest? = null
     private var isListeningLocationUpdates = false
+    private var disposed = false
+    private val singleRequests = mutableMapOf<TencentLocationListener, (Result<LocationData?>) -> Unit>()
 
     override fun configure(options: InitOptions): Boolean {
+        if (disposed) throw FlutterError("disposed", "定位插件已释放")
+        if (isListeningLocationUpdates || singleRequests.isNotEmpty()) {
+            throw FlutterError("in-progress", "定位进行中，不能重新初始化")
+        }
         TencentLocationManagerOptions.setKey(options.apiKey)
         locationManager = TencentLocationManager.getInstance(context)
 
@@ -51,12 +56,35 @@ class TencentLBSHostApiImpl(
         TencentLocationManager.setUserAgreePrivacy(agree)
     }
 
-    override fun requestLocationOnce() {
-        val manager = locationManager ?: return
-        val request = tencentLocationRequest ?: return
-        val errorCode = manager.requestSingleFreshLocation(request, this, Looper.getMainLooper())
-        if (errorCode != TencentLocation.ERROR_OK) {
-            flutterApi.onError(errorCode.toLong(), "requestSingleFreshLocation failed with error code $errorCode") {}
+    override fun requestLocationOnce(callback: (Result<LocationData?>) -> Unit) {
+        val manager = locationManager
+        val request = tencentLocationRequest
+        if (manager == null || request == null) {
+            callback(Result.success(null))
+            return
+        }
+        lateinit var listener: TencentLocationListener
+        fun finish(result: Result<LocationData?>) {
+            val pending = singleRequests.remove(listener) ?: return
+            manager.removeUpdates(listener)
+            pending(result)
+        }
+        // A single request must never consume a continuous callback or error.
+        listener = object : TencentLocationListener {
+            override fun onLocationChanged(location: TencentLocation?, error: Int, reason: String?) {
+                finish(Result.success(
+                    if (error == TencentLocation.ERROR_OK && location != null) toLocationData(location) else null,
+                ))
+            }
+
+            override fun onStatusUpdate(name: String?, status: Int, desc: String?) {}
+        }
+        singleRequests[listener] = callback
+        try {
+            val errorCode = manager.requestSingleFreshLocation(request, listener, Looper.getMainLooper())
+            if (errorCode != TencentLocation.ERROR_OK) finish(Result.success(null))
+        } catch (error: Throwable) {
+            finish(Result.failure(error))
         }
     }
 
@@ -71,9 +99,9 @@ class TencentLBSHostApiImpl(
         }
         // 后台定位必须提供通知配置且 id > 0，否则无法启用前台服务
         if (request.backgroundLocation == true) {
-            if (androidNotificationOptions == null || androidNotificationOptions.id.toInt() <= 0) {
-                flutterApi.onError(-1L, "后台定位需要 androidNotificationOptions 且 id > 0") {}
-                return
+            if (androidNotificationOptions == null ||
+                androidNotificationOptions.id !in 1..Int.MAX_VALUE.toLong()) {
+                throw FlutterError("invalid-argument", "后台定位需要 androidNotificationOptions 且 id 为正的 32 位整数")
             }
         }
         val intervalError = validateIntervalMs(request.intervalMs)
@@ -95,8 +123,7 @@ class TencentLBSHostApiImpl(
         if (request.backgroundLocation == true && androidNotificationOptions != null) {
             val notifId = androidNotificationOptions.id.toInt()
             if (notifId > 0) {
-                val opts = toNotificationOptions(androidNotificationOptions)
-                manager.enableForegroundLocation(notifId, NotificationUtils.buildNotification(context, opts))
+                manager.enableForegroundLocation(notifId, NotificationUtils.buildNotification(context, androidNotificationOptions))
             }
         }
         val errorCode = manager.requestLocationUpdates(req, this, Looper.getMainLooper())
@@ -173,32 +200,51 @@ class TencentLBSHostApiImpl(
         locationManager?.removeUpdates(this)
     }
 
+    fun dispose() {
+        if (disposed) return
+        disposed = true
+        val manager = locationManager
+        stopLocationUpdates()
+        val pending = singleRequests.toMap()
+        singleRequests.clear()
+        locationManager = null
+        tencentLocationRequest = null
+        for ((listener, callback) in pending) {
+            manager?.removeUpdates(listener)
+            callback(Result.success(null))
+        }
+    }
+
     override fun onLocationChanged(location: TencentLocation?, error: Int, reason: String?) {
+        if (disposed) return
         if (error == TencentLocation.ERROR_OK && location != null) {
-            val rawProvider = location.sourceProvider
-            val unifiedSource = toUnifiedLocationSource(rawProvider)
-            val acc = location.accuracy.toDouble()
-            val data = LocationData(
-                code = error.toLong(),
-                latitude = location.latitude.toDouble(),
-                longitude = location.longitude.toDouble(),
-                altitude = location.altitude.toDouble(),
-                accuracy = acc,
-                horizontalAccuracy = acc,
-                verticalAccuracy = null,
-                speed = location.speed.toDouble(),
-                bearing = location.bearing.toDouble().takeIf { it in 0.0..360.0 },
-                address = location.address,
-                name = location.name,
-                timeIso = null,
-                timeMs = location.time,
-                sourceProvider = rawProvider,
-                locationSource = unifiedSource,
-            )
-            flutterApi.onLocation(data) {}
+            flutterApi.onLocation(toLocationData(location)) {}
         } else {
             flutterApi.onError(error.toLong(), reason ?: "定位失败") {}
         }
+    }
+
+    private fun toLocationData(location: TencentLocation): LocationData {
+        val rawProvider = location.sourceProvider
+        val unifiedSource = toUnifiedLocationSource(rawProvider)
+        val acc = location.accuracy.toDouble()
+        return LocationData(
+            code = TencentLocation.ERROR_OK.toLong(),
+            latitude = location.latitude.toDouble(),
+            longitude = location.longitude.toDouble(),
+            altitude = location.altitude.toDouble(),
+            accuracy = acc,
+            horizontalAccuracy = acc,
+            verticalAccuracy = null,
+            speed = location.speed.toDouble(),
+            bearing = location.bearing.toDouble().takeIf { it in 0.0..360.0 },
+            address = location.address,
+            name = location.name,
+            timeIso = null,
+            timeMs = location.time,
+            sourceProvider = rawProvider,
+            locationSource = unifiedSource,
+        )
     }
 
     /**
@@ -221,21 +267,8 @@ class TencentLBSHostApiImpl(
     }
 
     override fun onStatusUpdate(name: String?, status: Int, desc: String?) {
+        if (disposed) return
         flutterApi.onStatus(LocationStatusData(name = name, status = status.toLong())) {}
-    }
-
-    private fun toNotificationOptions(p: AndroidNotificationOptions): NotificationOptions {
-        return NotificationOptions(
-            id = p.id.toInt(),
-            channelId = p.channelId,
-            channelName = p.channelName,
-            contentTitle = p.notificationTitle,
-            contentText = p.notificationText ?: "",
-            channelDescription = p.channelDescription,
-            enableVibration = p.enableVibration ?: false,
-            playSound = p.playSound ?: false,
-            showWhen = p.showWhen ?: false,
-        )
     }
 
     private fun applyCommonRequestOptions(

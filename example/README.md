@@ -3,8 +3,8 @@
 ## 运行前准备
 
 1. **申请 Key**：在 [腾讯位置服务](https://lbs.qq.com/) 申请 Android / iOS Key。
-2. **替换 Key**：
-   - 在 `lib/main.dart` 中把 `locationPlugin.init(key: "YOUR KEY")` 的 `"YOUR KEY"` 换成你的 Key。
+2. **配置 Key**：
+   - 运行时传入 `--dart-define=TENCENT_MAP_KEY=你的Key`，示例不内置 Key。
    - Android：在 `android/app/src/main/AndroidManifest.xml` 中把 `<meta-data android:name="TencentMapSDK" android:value="YOUR KEY" />` 的 `YOUR KEY` 换成你的 Key。
 
 ## 运行
@@ -13,7 +13,7 @@
 # 在仓库根目录
 cd example
 flutter pub get
-flutter run
+flutter run --dart-define=TENCENT_MAP_KEY=你的Key
 ```
 
 ## 功能说明

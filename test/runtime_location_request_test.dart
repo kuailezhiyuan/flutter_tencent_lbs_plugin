@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_tencent_lbs_plugin/flutter_tencent_lbs_plugin.dart';
@@ -15,11 +18,14 @@ void main() {
   final requests = <pigeon.ContinuousLocationRequest>[];
   final updates = <pigeon.LocationRequestUpdate>[];
   var failUpdate = false;
+  var failOnce = false;
+  final onceReplies = <Completer<List<Object?>>>[];
   const hostMethods = [
     'configure',
     'startLocationUpdates',
     'updateLocationRequest',
     'stopLocationUpdates',
+    'requestLocationOnce',
   ];
 
   BasicMessageChannel<Object?> channel(
@@ -34,6 +40,8 @@ void main() {
     requests.clear();
     updates.clear();
     failUpdate = false;
+    failOnce = false;
+    onceReplies.clear();
     FlutterTencentLBSPluginPlatform.instance =
         FlutterTencentLBSPluginPigeonPlatform();
     for (final method in hostMethods) {
@@ -43,6 +51,12 @@ void main() {
         calls.add(method);
         final arguments = message as List<Object?>?;
         if (method == 'configure') return <Object?>[true];
+        if (method == 'requestLocationOnce') {
+          if (failOnce) return <Object?>['request-failed', 'SDK threw', null];
+          final reply = Completer<List<Object?>>();
+          onceReplies.add(reply);
+          return reply.future;
+        }
         if (method == 'startLocationUpdates') {
           requests.add(arguments![0]! as pigeon.ContinuousLocationRequest);
         }
@@ -68,7 +82,124 @@ void main() {
     }
   });
 
+  Future<void> sendEvent(String method, List<Object?> arguments) async {
+    final done = Completer<void>();
+    messenger.handlePlatformMessage(
+      'dev.flutter.pigeon.flutter_tencent_lbs_plugin.TencentLBSFlutterApi.$method',
+      pigeon.TencentLBSFlutterApi.pigeonChannelCodec.encodeMessage(arguments),
+      (_) => done.complete(),
+    );
+    await done.future;
+  }
+
+  pigeon.LocationData position(double latitude) =>
+      pigeon.LocationData(code: 0, latitude: latitude, longitude: 1);
+
+  group('single requests', () {
+    test('a host exception releases the pending request for retry', () async {
+      failOnce = true;
+      await expectLater(
+        plugin.getLocationOnce(),
+        throwsA(isA<PlatformException>()),
+      );
+      failOnce = false;
+      final retry = plugin.getLocationOnce();
+      await Future<void>.delayed(Duration.zero);
+      onceReplies.single.complete([position(1)]);
+      expect((await retry)?.latitude, 1);
+    });
+
+    test(
+      'concurrent single requests are rejected without blocking later ones',
+      () async {
+        final first = plugin.getLocationOnce();
+        await expectLater(plugin.getLocationOnce(), throwsStateError);
+        expect(onceReplies, hasLength(1));
+        onceReplies.first.complete([null]);
+        expect(await first, isNull);
+        final next = plugin.getLocationOnce();
+        await Future<void>.delayed(Duration.zero);
+        onceReplies.last.complete([position(2)]);
+        expect((await next)?.latitude, 2);
+      },
+    );
+
+    test(
+      'single replies and continuous locations and errors stay independent',
+      () async {
+        final locations = <Location>[];
+        final failures = <Location>[];
+        plugin.addLocationListener(locations.add);
+        plugin.addFailListener(failures.add);
+        await plugin.getLocation(interval: 1000);
+        var singleCompleted = false;
+        final single = plugin.getLocationOnce().then((value) {
+          singleCompleted = true;
+          return value;
+        });
+        await sendEvent('onLocation', [position(10)]);
+        await sendEvent('onError', [7, 'continuous failure']);
+        expect(locations.single.latitude, 10);
+        expect(failures.single.code, 7);
+        expect(singleCompleted, isFalse);
+        onceReplies.single.complete([position(20)]);
+        expect((await single)?.latitude, 20);
+        expect(locations, hasLength(1));
+        expect(failures, hasLength(1));
+
+        final failedSingle = plugin.getLocationOnce();
+        await Future<void>.delayed(Duration.zero);
+        onceReplies.last.complete([null]);
+        expect(await failedSingle, isNull);
+        expect(failures, hasLength(1));
+        await sendEvent('onLocation', [position(30)]);
+        expect(locations.last.latitude, 30);
+      },
+    );
+
+    test(
+      'timeout releases the request and a late reply cannot finish its successor',
+      () {
+        fakeAsync((clock) {
+          var firstCompleted = false;
+          plugin.getLocationOnce().then((value) {
+            expect(value, isNull);
+            firstCompleted = true;
+          });
+          clock.flushMicrotasks();
+          clock.elapse(const Duration(seconds: 30));
+          expect(firstCompleted, isTrue);
+          var secondCompleted = false;
+          plugin.getLocationOnce().then((value) {
+            expect(value?.latitude, 2);
+            secondCompleted = true;
+          });
+          clock.flushMicrotasks();
+          expect(onceReplies, hasLength(2));
+          onceReplies.first.complete([position(1)]);
+          clock.flushMicrotasks();
+          expect(secondCompleted, isFalse);
+          onceReplies.last.complete([position(2)]);
+          clock.flushMicrotasks();
+          expect(secondCompleted, isTrue);
+        });
+      },
+    );
+  });
+
   group('runtime requests', () {
+    test('a location without a result code remains a failure', () async {
+      final locations = <Location>[];
+      final failures = <Location>[];
+      plugin.addLocationListener(locations.add);
+      plugin.addFailListener(failures.add);
+      await sendEvent('onLocation', [
+        pigeon.LocationData(latitude: 1, longitude: 2),
+      ]);
+      expect(locations.single.code, 1);
+      expect(failures.single, same(locations.single));
+    });
+
     test('start forwards background and iOS settings through Pigeon', () async {
       await plugin.getLocation(
         interval: 1000,

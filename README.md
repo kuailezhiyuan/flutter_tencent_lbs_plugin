@@ -17,8 +17,10 @@ Flutter 腾讯位置服务 / 定位插件（第三方），基于腾讯定位 SD
 
 | 平台    | 版本号   |
 |---------|----------|
-| Android | 7.6.1.8（Maven: `com.tencent.map.geolocation:TencentLocationSdk-openplatform`） |
-| iOS     | 4.3.1（flutter_tencent_lbs_plugin/TencentLBS.xcframework） |
+| Android | 7.6.1.9（Maven: `com.tencent.map.geolocation:TencentLocationSdk-openplatform`） |
+| iOS     | 4.3.2（flutter_tencent_lbs_plugin/TencentLBS.xcframework） |
+
+版本采用腾讯官方当前下载页提供的 [Android 7.6.1.9](https://lbs.qq.com/mobile/androidLocationSDK/androidGeoDownload) 和 [iOS 4.3.2](https://lbs.qq.com/mobile/iosLocationSDK/iosGeoDownload)。iOS 的 CocoaPods 与 SPM 共用上述 XCFramework。
 
 ---
 
@@ -120,7 +122,7 @@ Future<bool> init({
 Future<Location?> getLocationOnce() async
 ```
 
-返回 `Location?`，超时或失败为 `null`；成功时 `location.code == 0`。
+返回 `Location?`，SDK 定位失败或 30 秒超时返回 `null`；成功时 `location.code == 0`。未初始化、同时发起多个单次请求或平台通信异常会抛出异常，异常和超时后可以重试。单次结果独立返回，不进入连续定位监听器；连续定位的回调也不会完成单次请求。
 
 ### 4. 连续定位 `getLocation()`
 
@@ -250,6 +252,7 @@ void stop();
 <uses-permission android:name="android.permission.BLUETOOTH"/>
 <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
 <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
 <uses-permission android:name="android.permission.ACCESS_LOCATION_EXTRA_COMMANDS"/>
 ```
@@ -310,7 +313,7 @@ void stop();
 - **平台抽象**：`lib/flutter_tencent_lbs_plugin_platform_interface.dart`，定义接口与默认占位实现；实际实现为 Pigeon 平台。
 - **Pigeon 实现**：`lib/src/flutter_tencent_lbs_plugin_pigeon_platform.dart`，实现接口并调用 Pigeon 生成 API；将 Pigeon 的 `LocationData` 转为对外 `Location`。
 - **Pigeon 定义**：`pigeons/location_api.dart`。修改后需执行：  
-  `dart run pigeon --input pigeons/location_api.dart`  
+  `dart run pigeon --input pigeons/location_api.dart`，然后执行 `dart format lib/src/pigeon/location_pigeon.dart`。
   会生成：`lib/src/pigeon/location_pigeon.dart`、Android `pigeon/LocationPigeon.kt`、iOS `ios/flutter_tencent_lbs_plugin/Sources/flutter_tencent_lbs_plugin/pigeon/LocationPigeon.swift`。**序列化格式为 List（按字段顺序），不可改为 Map；修改通信协议时应修改 pigeons 定义并重新生成，勿手改生成文件。**
 - **原生层（手写）**：Android 实现位于 `android/.../pigeon/TencentLBSHostApiImpl.kt`；iOS 为 `ios/flutter_tencent_lbs_plugin/Sources/flutter_tencent_lbs_plugin/TencentLBSHostApiImpl.swift`、`FlutterTencentLbsPlugin.swift`（支持 CocoaPods + SPM 双模式），仅使用 Swift + Pigeon，无 ObjC Pigeon、无 Bridging Header。
 - **请求校验与节流**：`lib/src/location_request_validation.dart` 由公开 API 和 Pigeon 平台实现共用；iOS `LocationCallbackThrottle.swift` 独立维护新回调的节流，不负责定位生命周期。
