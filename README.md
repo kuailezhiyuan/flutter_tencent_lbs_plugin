@@ -122,7 +122,7 @@ Future<bool> init({
 Future<Location?> getLocationOnce() async
 ```
 
-返回 `Location?`，SDK 定位失败或 30 秒超时返回 `null`；成功时 `location.code == 0`。未初始化、同时发起多个单次请求或平台通信异常会抛出异常，异常和超时后可以重试。单次结果独立返回，不进入连续定位监听器；连续定位的回调也不会完成单次请求。
+返回 `Location?`，SDK 定位失败或 30 秒超时返回 `null`；成功时 `location.code == 0`。超时由原生层处理，先取消 SDK 请求、释放回调，再返回 `null`，之后可以重试或重新初始化。未初始化、同时发起多个单次请求或平台通信异常会抛出异常，异常后可以重试。单次结果独立返回，不进入连续定位监听器；连续定位的回调也不会完成单次请求。
 
 ### 4. 连续定位 `getLocation()`
 
@@ -162,7 +162,7 @@ Future<void> updateLocationRequest({
 }) async
 ```
 
-更新期间保持原有定位会话和后台服务：Android 仅改间隔时调用 `changeCallbackInterval`，其余参数使用同一 listener 再次调用 `requestLocationUpdates`，不先 `removeUpdates`；iOS 原地更新 `desiredAccuracy`、`distanceFilter` 和 `requestLevel`，不调用 `stopUpdatingLocation`。
+更新期间保持原有定位会话和后台服务：Android 仅改间隔时调用 `changeCallbackInterval`，其余参数使用同一 listener 再次调用 `requestLocationUpdates`，成功后用 `removeLocationListener` 移除多出的一份注册，不先 `removeUpdates`；iOS 原地更新 `desiredAccuracy`、`distanceFilter` 和 `requestLevel`，不调用 `stopUpdatingLocation`。
 
 iOS 启动时关闭 SDK 的周期回调计时器（`locationCallbackInterval = 0`），由插件按 `interval` 对新定位结果节流。运行中改变间隔立即作用于后续新结果，不重启定位，也不定时重复发送旧位置；减少 GPS 耗电仍需降低精度要求。单次定位不参与此节流。
 
@@ -317,7 +317,7 @@ void stop();
   会生成：`lib/src/pigeon/location_pigeon.dart`、Android `pigeon/LocationPigeon.kt`、iOS `ios/flutter_tencent_lbs_plugin/Sources/flutter_tencent_lbs_plugin/pigeon/LocationPigeon.swift`。**序列化格式为 List（按字段顺序），不可改为 Map；修改通信协议时应修改 pigeons 定义并重新生成，勿手改生成文件。**
 - **原生层（手写）**：Android 实现位于 `android/.../pigeon/TencentLBSHostApiImpl.kt`；iOS 为 `ios/flutter_tencent_lbs_plugin/Sources/flutter_tencent_lbs_plugin/TencentLBSHostApiImpl.swift`、`FlutterTencentLbsPlugin.swift`（支持 CocoaPods + SPM 双模式），仅使用 Swift + Pigeon，无 ObjC Pigeon、无 Bridging Header。
 - **请求校验与节流**：`lib/src/location_request_validation.dart` 由公开 API 和 Pigeon 平台实现共用；iOS `LocationCallbackThrottle.swift` 独立维护新回调的节流，不负责定位生命周期。
-- **测试**：`test/runtime_location_request_test.dart` 分为请求行为与可选日志两组，共享 Pigeon mock；Android 请求测试和 Swift 节流测试分别验证对应原生职责。
+- **测试**：`test/runtime_location_request_test.dart` 验证单次请求隔离、结果处理和日志异常；Android 测试按 SDK 的重复注册语义检查切档、停止、超时清理和失败恢复，通过公开 API 建立会话；Swift 测试验证节流边界和切档后的首次回调。
 - **已废弃**：无 MethodChannel 实现；iOS 无 ObjC Pigeon 输出；插件不再生成或依赖 `LocationCode`、Bridging Header。
 
 ---

@@ -6,328 +6,326 @@ import com.flutter_tencent_lbs_plugin.pigeon.AndroidNotificationOptions
 import com.flutter_tencent_lbs_plugin.pigeon.ContinuousLocationRequest
 import com.flutter_tencent_lbs_plugin.pigeon.FlutterError
 import com.flutter_tencent_lbs_plugin.pigeon.InitOptions
-import com.flutter_tencent_lbs_plugin.pigeon.LocationRequestUpdate
 import com.flutter_tencent_lbs_plugin.pigeon.LocationData
+import com.flutter_tencent_lbs_plugin.pigeon.LocationRequestUpdate
 import com.flutter_tencent_lbs_plugin.pigeon.TencentLBSFlutterApi
 import com.flutter_tencent_lbs_plugin.pigeon.TencentLBSHostApiImpl
+import com.tencent.map.geolocation.TencentLocation
 import com.tencent.map.geolocation.TencentLocationListener
 import com.tencent.map.geolocation.TencentLocationManager
-import com.tencent.map.geolocation.TencentLocation
 import com.tencent.map.geolocation.TencentLocationRequest
+import java.time.Duration
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertNotSame
 import kotlin.test.assertTrue
-import io.flutter.embedding.engine.plugins.FlutterPlugin
-import io.flutter.plugin.common.BinaryMessenger
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.mockito.ArgumentCaptor
 import org.mockito.Mockito
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.LooperMode
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], manifest = Config.NONE)
+@LooperMode(LooperMode.Mode.PAUSED)
 class RuntimeLocationRequestTest {
     private lateinit var host: TencentLBSHostApiImpl
     private lateinit var manager: TencentLocationManager
-    private lateinit var initialRequest: TencentLocationRequest
     private lateinit var flutterApi: TencentLBSFlutterApi
+    private lateinit var activeRequest: TencentLocationRequest
+    private val continuousListeners = mutableListOf<TencentLocationListener>()
+    private val singleListeners = mutableListOf<TencentLocationListener>()
+    private var nextRegistrationError = 0
+    private var foregroundEnabled = false
+    private var engineStops = 0
+
+    @After
+    fun tearDown() {
+        host.dispose()
+    }
 
     @Before
     fun setUp() {
         val context: Context = RuntimeEnvironment.getApplication()
         manager = Mockito.mock(TencentLocationManager::class.java)
         flutterApi = Mockito.mock(TencentLBSFlutterApi::class.java)
-        host = TencentLBSHostApiImpl(context, flutterApi)
-        initialRequest = TencentLocationRequest.create().apply {
-            interval = 1000
-            locMode = TencentLocationRequest.HIGH_ACCURACY_MODE
-            isAllowGPS = true
-            isAllowCache = false
-            isGpsFirst = false
+        host = TencentLBSHostApiImpl(context, flutterApi) { manager }
+        host.configure(InitOptions(apiKey = "test"))
+
+        // SDK 7.6.1.9 appends registrations even for the same listener.
+        // Model that contract so a mock cannot conceal duplicate callbacks or
+        // a location engine left running after stop/dispose.
+        Mockito.`when`(manager.requestLocationUpdates(
+            Mockito.any(TencentLocationRequest::class.java),
+            Mockito.any(TencentLocationListener::class.java), Mockito.eq(Looper.getMainLooper()),
+        )).thenAnswer { call ->
+            if (nextRegistrationError != 0) nextRegistrationError else {
+                activeRequest = call.getArgument(0)
+                continuousListeners.add(call.getArgument(1))
+                0
+            }
         }
-        setState("locationManager", manager)
-        setState("tencentLocationRequest", initialRequest)
-        setState("isListeningLocationUpdates", true)
+        Mockito.`when`(manager.requestSingleFreshLocation(
+            Mockito.any(TencentLocationRequest::class.java),
+            Mockito.any(TencentLocationListener::class.java), Mockito.eq(Looper.getMainLooper()),
+        )).thenAnswer { call ->
+            singleListeners.add(call.getArgument(1))
+            0
+        }
+        Mockito.doAnswer { call ->
+            continuousListeners.remove(call.getArgument<TencentLocationListener>(0))
+            null
+        }.`when`(manager).removeLocationListener(Mockito.any(TencentLocationListener::class.java))
+        Mockito.doAnswer { call ->
+            val listener = call.getArgument<TencentLocationListener>(0)
+            continuousListeners.remove(listener)
+            singleListeners.remove(listener)
+            if (continuousListeners.isEmpty() && singleListeners.isEmpty()) engineStops += 1
+            null
+        }.`when`(manager).removeUpdates(Mockito.any(TencentLocationListener::class.java))
+        Mockito.doAnswer {
+            foregroundEnabled = true
+            null
+        }.`when`(manager).enableForegroundLocation(Mockito.anyInt(), Mockito.any())
+        Mockito.doAnswer {
+            foregroundEnabled = false
+            null
+        }.`when`(manager).disableForegroundLocation(true)
     }
 
-    @Test
-    fun switchingModesKeepsListenerAndForegroundService() {
-        host.updateLocationRequest(LocationRequestUpdate(
-            intervalMs = 30000,
-            locMode = TencentLocationRequest.ONLY_NETWORK_MODE.toLong(),
-            allowGps = false,
-        ))
-        host.updateLocationRequest(LocationRequestUpdate(
-            intervalMs = 1000,
-            locMode = TencentLocationRequest.HIGH_ACCURACY_MODE.toLong(),
-            allowGps = true,
-        ))
-
-        val captor = ArgumentCaptor.forClass(TencentLocationRequest::class.java)
-        Mockito.verify(manager, Mockito.times(2)).requestLocationUpdates(
-            captor.capture(), Mockito.same(host), Mockito.eq(Looper.getMainLooper()),
+    private fun start(background: Boolean = false) {
+        host.startLocationUpdates(
+            ContinuousLocationRequest(intervalMs = 1000, backgroundLocation = background, allowCache = false),
+            if (background) AndroidNotificationOptions(
+                id = 1, channelId = "location", channelName = "Location", notificationTitle = "Location",
+            ) else null,
         )
-        val low = captor.allValues[0]
-        val high = captor.allValues[1]
-        assertEquals(30000L, low.interval)
-        assertEquals(TencentLocationRequest.ONLY_NETWORK_MODE, low.locMode)
-        assertFalse(low.isAllowGPS)
-        assertEquals(1000L, high.interval)
-        assertEquals(TencentLocationRequest.HIGH_ACCURACY_MODE, high.locMode)
-        assertTrue(high.isAllowGPS)
-        assertFalse(high.isAllowCache)
-        assertFalse(high.isGpsFirst)
-        assertEquals(TencentLocationRequest.HIGH_ACCURACY_MODE, initialRequest.locMode)
-        Mockito.verifyNoMoreInteractions(manager)
+    }
+
+    private fun deliverContinuousLocation() {
+        val location = Mockito.mock(TencentLocation::class.java)
+        continuousListeners.toList().forEach { it.onLocationChanged(location, TencentLocation.ERROR_OK, "") }
     }
 
     @Test
-    fun changingOnlyIntervalUsesNativeIntervalUpdate() {
+    fun modeSwitchesDeliverOnceAndStopReleasesTheEngine() {
+        start(background = true)
+        val original = activeRequest
+        host.updateLocationRequest(LocationRequestUpdate(intervalMs = 30000, locMode = 11, allowGps = false))
+        assertEquals(11, activeRequest.locMode)
+        assertFalse(activeRequest.isAllowGPS)
+        host.updateLocationRequest(LocationRequestUpdate(intervalMs = 1000, locMode = 10, allowGps = true))
+        assertEquals(10, activeRequest.locMode)
+        assertTrue(activeRequest.isAllowGPS)
+        assertFalse(activeRequest.isAllowCache)
+        assertEquals(10, original.locMode)
+        assertTrue(foregroundEnabled)
+        assertEquals(0, engineStops)
+        deliverContinuousLocation()
+        Mockito.verify(flutterApi).onLocation(Mockito.any(LocationData::class.java) ?: LocationData(), anyCallback())
+
+        host.stopLocationUpdates()
+        assertTrue(continuousListeners.isEmpty())
+        assertEquals(1, engineStops)
+        assertFalse(foregroundEnabled)
+        Mockito.clearInvocations(flutterApi)
+        deliverContinuousLocation()
+        Mockito.verifyNoInteractions(flutterApi)
+    }
+
+    @Test
+    fun intervalOnlyUpdatesKeepOneRegistrationAndTheForegroundService() {
+        start(background = true)
         host.updateLocationRequest(LocationRequestUpdate(intervalMs = 15000))
         Mockito.verify(manager).changeCallbackInterval(15000)
-        assertEquals(15000L, initialRequest.interval)
-        Mockito.verifyNoMoreInteractions(manager)
+        assertEquals(15000L, activeRequest.interval)
+        assertEquals(1, continuousListeners.size)
+        assertTrue(foregroundEnabled)
+        host.stopLocationUpdates()
+        assertTrue(continuousListeners.isEmpty())
+        assertEquals(1, engineStops)
     }
 
     @Test
-    fun failedUpdatePreservesPreviousRequestAndSession() {
-        Mockito.`when`(manager.requestLocationUpdates(
-            Mockito.any(TencentLocationRequest::class.java), Mockito.same(host),
-            Mockito.eq(Looper.getMainLooper()),
-        )).thenReturn(1, 0)
-
+    fun failedUpdatePreservesTheActiveRequestAndCanBeRetried() {
+        start(background = true)
+        nextRegistrationError = 1
         val failure = assertFailsWith<FlutterError> {
-            host.updateLocationRequest(LocationRequestUpdate(
-                intervalMs = 30000,
-                locMode = TencentLocationRequest.ONLY_NETWORK_MODE.toLong(),
-                allowGps = false,
-            ))
+            host.updateLocationRequest(LocationRequestUpdate(intervalMs = 30000, locMode = 11, allowGps = false))
         }
         assertEquals("location-request-failed", failure.code)
+        assertEquals(listOf<TencentLocationListener>(host), continuousListeners)
+        assertTrue(foregroundEnabled)
+        deliverContinuousLocation()
+        Mockito.verify(flutterApi).onLocation(Mockito.any(LocationData::class.java) ?: LocationData(), anyCallback())
+
+        nextRegistrationError = 0
         host.updateLocationRequest(LocationRequestUpdate(requestLevel = 0))
-        val captor = ArgumentCaptor.forClass(TencentLocationRequest::class.java)
-        Mockito.verify(manager, Mockito.times(2)).requestLocationUpdates(
-            captor.capture(), Mockito.same(host), Mockito.eq(Looper.getMainLooper()),
-        )
-        val recovered = captor.allValues[1]
-        assertEquals(1000L, recovered.interval)
-        assertEquals(TencentLocationRequest.HIGH_ACCURACY_MODE, recovered.locMode)
-        assertTrue(recovered.isAllowGPS)
-        Mockito.verifyNoMoreInteractions(manager)
+        assertEquals(1000L, activeRequest.interval)
+        assertEquals(10, activeRequest.locMode)
+        assertTrue(activeRequest.isAllowGPS)
+        assertEquals(listOf<TencentLocationListener>(host), continuousListeners)
+        host.stopLocationUpdates()
+        assertEquals(1, engineStops)
     }
 
     @Test
-    fun invalidUpdatesLeaveActiveRequestUntouched() {
+    fun invalidUpdatesLeaveTheActiveRequestUntouched() {
+        start()
         assertFailsWith<FlutterError> {
             host.updateLocationRequest(LocationRequestUpdate(intervalMs = 500, locMode = 11))
         }
         assertFailsWith<FlutterError> {
             host.updateLocationRequest(LocationRequestUpdate(locMode = 4294967306))
         }
-        assertEquals(1000L, initialRequest.interval)
-        assertEquals(TencentLocationRequest.HIGH_ACCURACY_MODE, initialRequest.locMode)
-        Mockito.verifyNoInteractions(manager)
+        assertEquals(1000L, activeRequest.interval)
+        assertEquals(10, activeRequest.locMode)
+        assertEquals(listOf<TencentLocationListener>(host), continuousListeners)
+        assertEquals(0, engineStops)
     }
 
     @Test
-    fun iosOnlyFieldsDoNotRestartAndroid() {
-        host.updateLocationRequest(LocationRequestUpdate(iosDesiredAccuracy = 100.0, iosDistanceFilter = 50.0))
-        host.updateLocationRequest(LocationRequestUpdate())
-        Mockito.verifyNoInteractions(manager)
-    }
-
-    @Test
-    fun updatingStoppedSessionReportsError() {
-        setState("isListeningLocationUpdates", false)
-        val failure = assertFailsWith<FlutterError> {
-            host.updateLocationRequest(LocationRequestUpdate(locMode = 11))
-        }
-        assertEquals("not-started", failure.code)
-        Mockito.verifyNoInteractions(manager)
-    }
-
-    @Test
-    fun locationCallbacksAreDelivered() {
-        Mockito.clearInvocations(flutterApi)
-        val location = Mockito.mock(TencentLocation::class.java)
-        repeat(3) { host.onLocationChanged(location, TencentLocation.ERROR_OK, "") }
-        Mockito.verify(flutterApi, Mockito.times(3)).onLocation(Mockito.any(LocationData::class.java) ?: LocationData(), anyCallback())
-    }
-
-    @Test
-    fun singleRequestUsesSeparateListenerAndKeepsContinuousEvents() {
+    fun singleRepliesAndContinuousEventsStayIndependent() {
+        start()
         val replies = mutableListOf<LocationData?>()
         host.requestLocationOnce { replies.add(it.getOrThrow()) }
-        val listener = ArgumentCaptor.forClass(TencentLocationListener::class.java)
-        Mockito.verify(manager).requestSingleFreshLocation(
-            Mockito.same(initialRequest), listener.capture(), Mockito.eq(Looper.getMainLooper()),
-        )
-        assertNotSame(host, listener.value)
-        val location = Mockito.mock(TencentLocation::class.java)
-        host.onLocationChanged(location, TencentLocation.ERROR_OK, "")
+        val listener = singleListeners.single()
+        assertNotSame(host, listener)
+        deliverContinuousLocation()
         host.onLocationChanged(null, 7, "continuous failure")
         assertTrue(replies.isEmpty())
         Mockito.verify(flutterApi).onLocation(Mockito.any(LocationData::class.java) ?: LocationData(), anyCallback())
         Mockito.verify(flutterApi).onError(Mockito.eq(7L), Mockito.eq("continuous failure") ?: "", anyCallback())
+        Mockito.clearInvocations(flutterApi)
 
-        listener.value.onLocationChanged(location, TencentLocation.ERROR_OK, "")
-        assertEquals(1, replies.size)
+        listener.onLocationChanged(Mockito.mock(TencentLocation::class.java), TencentLocation.ERROR_OK, "")
+        listener.onLocationChanged(null, 8, "late duplicate")
         assertEquals(0L, replies.single()?.code)
-        listener.value.onLocationChanged(null, 8, "late duplicate")
-        assertEquals(1, replies.size)
-        Mockito.verifyNoMoreInteractions(flutterApi)
-    }
-
-    @Test
-    fun singleRequestErrorsOnlyCompleteTheirOwnReply() {
-        val replies = mutableListOf<LocationData?>()
         host.requestLocationOnce { replies.add(it.getOrThrow()) }
-        val listener = ArgumentCaptor.forClass(TencentLocationListener::class.java)
-        Mockito.verify(manager).requestSingleFreshLocation(
-            Mockito.same(initialRequest), listener.capture(), Mockito.eq(Looper.getMainLooper()),
-        )
-        listener.value.onLocationChanged(null, 7, "single failure")
-        assertEquals(1, replies.size)
-        assertNull(replies.single())
+        singleListeners.single().onLocationChanged(null, 7, "single failure")
+        assertNull(replies.last())
         Mockito.verifyNoInteractions(flutterApi)
     }
 
     @Test
-    fun singleRequestRegistrationFailureAndExceptionReachTheirReply() {
+    fun singleTimeoutCleansUpBeforeReplyAndLateResultsCannotFinishTheRetry() {
+        val replies = mutableListOf<LocationData?>()
+        host.requestLocationOnce {
+            assertTrue(singleListeners.isEmpty())
+            replies.add(it.getOrThrow())
+        }
+        val expiredListener = singleListeners.single()
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(30))
+        assertEquals(listOf<LocationData?>(null), replies)
+        assertEquals(1, engineStops)
+        // A timed-out request must no longer prevent reinitialization.
+        host.configure(InitOptions(apiKey = "retry"))
+        host.requestLocationOnce { replies.add(it.getOrThrow()) }
+        expiredListener.onLocationChanged(Mockito.mock(TencentLocation::class.java), TencentLocation.ERROR_OK, "late")
+        assertEquals(1, replies.size)
+        singleListeners.single().onLocationChanged(Mockito.mock(TencentLocation::class.java), TencentLocation.ERROR_OK, "")
+        assertEquals(0L, replies.last()?.code)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(30))
+        assertEquals(2, replies.size)
+    }
+
+    @Test
+    fun singleTimeoutLeavesContinuousLocationAndItsForegroundServiceRunning() {
+        start(background = true)
+        host.requestLocationOnce { assertNull(it.getOrThrow()) }
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(30))
+        assertTrue(singleListeners.isEmpty())
+        assertEquals(listOf<TencentLocationListener>(host), continuousListeners)
+        assertTrue(foregroundEnabled)
+        assertEquals(0, engineStops)
+        deliverContinuousLocation()
+        Mockito.verify(flutterApi).onLocation(Mockito.any(LocationData::class.java) ?: LocationData(), anyCallback())
+    }
+
+    @Test
+    fun singleRegistrationFailureAndExceptionAllowRetryWithoutLeakingTimeouts() {
         Mockito.`when`(manager.requestSingleFreshLocation(
             Mockito.any(TencentLocationRequest::class.java),
             Mockito.any(TencentLocationListener::class.java), Mockito.eq(Looper.getMainLooper()),
         )).thenReturn(1).thenThrow(SecurityException("permission revoked")).thenReturn(0)
         val replies = mutableListOf<Result<LocationData?>>()
         host.requestLocationOnce { replies.add(it) }
-        assertTrue(replies.single().isSuccess)
-        assertNull(replies.single().getOrNull())
         host.requestLocationOnce { replies.add(it) }
+        assertNull(replies.first().getOrThrow())
         assertTrue(replies.last().exceptionOrNull() is SecurityException)
         host.requestLocationOnce { replies.add(it) }
-        // The third request is pending its own SDK callback, rather than blocked.
-        assertEquals(2, replies.size)
-        Mockito.verify(manager, Mockito.times(3)).requestSingleFreshLocation(
-            Mockito.any(TencentLocationRequest::class.java),
-            Mockito.any(TencentLocationListener::class.java), Mockito.eq(Looper.getMainLooper()),
-        )
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(30))
+        assertEquals(3, replies.size)
+        assertNull(replies.last().getOrThrow())
+        host.configure(InitOptions(apiKey = "retry"))
         Mockito.verifyNoInteractions(flutterApi)
     }
 
     @Test
-    fun invalidBackgroundNotificationFailsBeforeStartingSdk() {
-        setState("isListeningLocationUpdates", false)
-        val notifications = listOf(null) + listOf(0L, -1L, Int.MAX_VALUE.toLong() + 1, 4294967297L).map {
+    fun invalidBackgroundNotificationDoesNotLeaveTheEngineOrServiceRunning() {
+        val notifications = listOf<AndroidNotificationOptions?>(null) + listOf(0L, -1L, Int.MAX_VALUE.toLong() + 1, 4294967297L).map {
             AndroidNotificationOptions(id = it, channelId = "location", channelName = "Location", notificationTitle = "Location")
         }
         for (notification in notifications) {
             val failure = assertFailsWith<FlutterError> {
-                host.startLocationUpdates(
-                    ContinuousLocationRequest(intervalMs = 1000, backgroundLocation = true), notification,
-                )
+                host.startLocationUpdates(ContinuousLocationRequest(intervalMs = 1000, backgroundLocation = true), notification)
             }
             assertEquals("invalid-argument", failure.code)
         }
-        Mockito.verifyNoInteractions(manager)
-        Mockito.verifyNoInteractions(flutterApi)
-    }
-
-    @Test
-    fun configureRejectsActiveContinuousOrSingleRequests() {
-        val continuousFailure = assertFailsWith<FlutterError> {
-            host.configure(InitOptions(apiKey = "test"))
-        }
-        assertEquals("in-progress", continuousFailure.code)
-        Mockito.verifyNoInteractions(manager)
-
-        setState("isListeningLocationUpdates", false)
-        host.requestLocationOnce {}
-        Mockito.clearInvocations(manager)
-        val singleFailure = assertFailsWith<FlutterError> {
-            host.configure(InitOptions(apiKey = "test"))
-        }
-        assertEquals("in-progress", singleFailure.code)
-        Mockito.verifyNoInteractions(manager)
-    }
-
-    @Test
-    fun stoppingContinuousLocationLeavesSingleRequestActive() {
-        val replies = mutableListOf<LocationData?>()
-        host.requestLocationOnce { replies.add(it.getOrThrow()) }
-        val listener = ArgumentCaptor.forClass(TencentLocationListener::class.java)
-        Mockito.verify(manager).requestSingleFreshLocation(
-            Mockito.same(initialRequest), listener.capture(), Mockito.eq(Looper.getMainLooper()),
-        )
+        assertTrue(continuousListeners.isEmpty())
+        assertFalse(foregroundEnabled)
+        start()
         host.stopLocationUpdates()
-        Mockito.verify(manager).removeUpdates(host)
-        Mockito.verify(manager, Mockito.never()).removeUpdates(listener.value)
-        assertTrue(replies.isEmpty())
-        val location = Mockito.mock(TencentLocation::class.java)
-        listener.value.onLocationChanged(location, TencentLocation.ERROR_OK, "")
-        assertEquals(0L, replies.single()?.code)
+        assertEquals(1, engineStops)
     }
 
     @Test
-    fun disposeReleasesAllRequestsOnceAndIgnoresLateCallbacks() {
+    fun stoppingContinuousLocationLeavesItsSingleRequestActiveButDropsQueuedEvents() {
+        start()
         val replies = mutableListOf<LocationData?>()
         host.requestLocationOnce { replies.add(it.getOrThrow()) }
-        val listener = ArgumentCaptor.forClass(TencentLocationListener::class.java)
-        Mockito.verify(manager).requestSingleFreshLocation(
-            Mockito.same(initialRequest), listener.capture(), Mockito.eq(Looper.getMainLooper()),
-        )
+        val listener = singleListeners.single()
+        host.stopLocationUpdates()
+        assertEquals(0, engineStops)
+        assertTrue(replies.isEmpty())
+        host.onLocationChanged(null, 7, "queued continuous error")
+        host.onStatusUpdate("gps", 1, "queued status")
+        Mockito.verifyNoInteractions(flutterApi)
+        listener.onLocationChanged(Mockito.mock(TencentLocation::class.java), TencentLocation.ERROR_OK, "")
+        assertEquals(0L, replies.single()?.code)
+        assertEquals(1, engineStops)
+    }
+
+    @Test
+    fun disposeReleasesRequestsAndTimeoutsOnceAndIgnoresLateCallbacks() {
+        start(background = true)
+        host.updateLocationRequest(LocationRequestUpdate(allowCache = true))
+        val replies = mutableListOf<LocationData?>()
+        host.requestLocationOnce { replies.add(it.getOrThrow()) }
+        val listener = singleListeners.single()
         host.dispose()
         host.dispose()
-        Mockito.verify(manager).disableForegroundLocation(true)
-        Mockito.verify(manager).removeUpdates(host)
-        Mockito.verify(manager).removeUpdates(listener.value)
-        assertEquals(1, replies.size)
-        assertNull(replies.single())
-        listener.value.onLocationChanged(null, 7, "late single error")
+        assertTrue(continuousListeners.isEmpty())
+        assertTrue(singleListeners.isEmpty())
+        assertFalse(foregroundEnabled)
+        assertEquals(1, engineStops)
+        assertEquals(listOf<LocationData?>(null), replies)
+        listener.onLocationChanged(null, 7, "late single error")
         host.onLocationChanged(null, 7, "late continuous error")
         host.onStatusUpdate("gps", 1, "late status")
-        assertEquals(1, replies.size)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(30))
+        assertEquals(listOf<LocationData?>(null), replies)
         Mockito.verifyNoInteractions(flutterApi)
-        val failure = assertFailsWith<FlutterError> {
-            host.configure(InitOptions(apiKey = "test"))
-        }
-        assertEquals("disposed", failure.code)
-    }
-
-    @Test
-    fun engineDetachDisposesItsHostBeforeRemovingChannels() {
-        val plugin = FlutterTencentLBSPlugin()
-        FlutterTencentLBSPlugin::class.java.getDeclaredField("hostApi").apply {
-            isAccessible = true
-            set(plugin, host)
-        }
-        val messenger = Mockito.mock(BinaryMessenger::class.java)
-        val binding = Mockito.mock(FlutterPlugin.FlutterPluginBinding::class.java)
-        Mockito.`when`(binding.binaryMessenger).thenReturn(messenger)
-        plugin.onDetachedFromEngine(binding)
-        val order = Mockito.inOrder(manager, messenger)
-        order.verify(manager).disableForegroundLocation(true)
-        order.verify(manager).removeUpdates(host)
-        order.verify(messenger).setMessageHandler(
-            "dev.flutter.pigeon.flutter_tencent_lbs_plugin.TencentLBSHostApi.configure", null,
-        )
-        plugin.onDetachedFromEngine(binding)
-        Mockito.verify(manager).removeUpdates(host)
+        assertEquals("disposed", assertFailsWith<FlutterError> { host.configure(InitOptions(apiKey = "test")) }.code)
     }
 
     // Java Mockito matchers return null; Pigeon's Kotlin methods require non-null arguments.
     private fun anyCallback(): (Result<Unit>) -> Unit = Mockito.any<(Result<Unit>) -> Unit>() ?: {}
-
-    private fun setState(name: String, value: Any) {
-        TencentLBSHostApiImpl::class.java.getDeclaredField(name).apply {
-            isAccessible = true
-            set(host, value)
-        }
-    }
 }

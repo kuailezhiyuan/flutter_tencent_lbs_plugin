@@ -11,7 +11,11 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
     private var isListenLocationUpdates = false
     private var callbackThrottle = LocationCallbackThrottle()
     private var disposed = false
-    private var singleRequests: [UUID: (Result<LocationData?, Error>) -> Void] = [:]
+    private struct PendingSingleRequest {
+        let completion: (Result<LocationData?, Error>) -> Void
+        let timeout: DispatchWorkItem
+    }
+    private var singleRequests: [UUID: PendingSingleRequest] = [:]
 
     override init() {
         super.init()
@@ -36,16 +40,7 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
             manager.coordinateType = ct == 0 ? .GCJ02 : .WGS84
         }
         if let rl = options.requestLevel {
-            let level: TencentLBSRequestLevel = {
-                switch rl {
-                case 0: return .geo
-                case 1: return .name
-                case 3: return .adminName
-                case 4: return .poi
-                default: return .adminName
-                }
-            }()
-            manager.requestLevel = level
+            manager.requestLevel = requestLevel(rl)
         }
         locationManager = manager
         return true
@@ -61,14 +56,25 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
             return
         }
         let requestID = UUID()
-        singleRequests[requestID] = completion
-        let accepted = manager.requestLocation(completionBlock: { [weak self] location, error in
-            guard let callback = self?.singleRequests.removeValue(forKey: requestID) else { return }
-            callback(.success(error == nil ? location.map { Self.toLocationData($0) } : nil))
-        })
-        if !accepted, let callback = singleRequests.removeValue(forKey: requestID) {
-            callback(.success(nil))
+        let timeout = DispatchWorkItem { [weak self] in
+            self?.finishSingleRequest(requestID, result: .success(nil), cancelSDKRequest: true)
         }
+        singleRequests[requestID] = PendingSingleRequest(completion: completion, timeout: timeout)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: timeout)
+        let accepted = manager.requestLocation(completionBlock: { [weak self] location, error in
+            self?.finishSingleRequest(requestID, result: .success(error == nil ? location.map { Self.toLocationData($0) } : nil))
+        })
+        if !accepted {
+            finishSingleRequest(requestID, result: .success(nil))
+        }
+    }
+
+    private func finishSingleRequest(_ id: UUID, result: Result<LocationData?, Error>, cancelSDKRequest: Bool = false) {
+        guard let pending = singleRequests.removeValue(forKey: id) else { return }
+        pending.timeout.cancel()
+        // Remove the pending entry before cancellation, which may call back.
+        if cancelSDKRequest { locationManager?.cancelRequestLocation() }
+        pending.completion(result)
     }
 
     func startLocationUpdates(request: ContinuousLocationRequest, androidNotificationOptions: AndroidNotificationOptions?) throws {
@@ -92,16 +98,7 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
         manager.allowsBackgroundLocationUpdates = request.backgroundLocation == true
         manager.pausesLocationUpdatesAutomatically = false
         if let rl = request.requestLevel {
-            let level: TencentLBSRequestLevel = {
-                switch rl {
-                case 0: return .geo
-                case 1: return .name
-                case 3: return .adminName
-                case 4: return .poi
-                default: return .adminName
-                }
-            }()
-            manager.requestLevel = level
+            manager.requestLevel = requestLevel(rl)
         }
         manager.startUpdatingLocation()
     }
@@ -124,18 +121,19 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
         if let distance = update.iosDistanceFilter { manager.distanceFilter = distance }
         if let interval = update.intervalMs { callbackThrottle.updateInterval(milliseconds: interval) }
         if let rl = update.requestLevel {
-            let level: TencentLBSRequestLevel = {
-                switch rl {
-                case 0: return .geo
-                case 1: return .name
-                case 3: return .adminName
-                case 4: return .poi
-                default: return .adminName
-                }
-            }()
-            manager.requestLevel = level
+            manager.requestLevel = requestLevel(rl)
         }
         // Keep the existing location session and its background authorization.
+    }
+
+    private func requestLevel(_ value: Int64) -> TencentLBSRequestLevel {
+        switch value {
+        case 0: return .geo
+        case 1: return .name
+        case 3: return .adminName
+        case 4: return .poi
+        default: return .adminName
+        }
     }
 
     private func desiredAccuracy(locMode: Int64?, explicitAccuracy: Double?) throws -> CLLocationAccuracy? {
@@ -174,12 +172,13 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
         disposed = true
         let pending = Array(singleRequests.values)
         singleRequests.removeAll()
+        for request in pending { request.timeout.cancel() }
         stopLocationUpdates()
         locationManager?.delegate = nil
         locationManager?.cancelRequestLocation()
         locationManager = nil
         flutterApi = nil
-        for callback in pending { callback(.success(nil)) }
+        for request in pending { request.completion(.success(nil)) }
     }
 
     func setBinaryMessenger(_ messenger: FlutterBinaryMessenger) {
@@ -188,12 +187,13 @@ final class TencentLBSHostApiImpl: NSObject, TencentLBSHostApi, TencentLBSLocati
 
     // MARK: - TencentLBSLocationManagerDelegate
     func tencentLBSLocationManager(_ manager: TencentLBSLocationManager, didUpdate location: TencentLBSLocation) {
-        guard isListenLocationUpdates,
+        guard isListenLocationUpdates, manager === locationManager,
               callbackThrottle.shouldDeliver(at: ProcessInfo.processInfo.systemUptime) else { return }
         flutterApi?.onLocation(location: Self.toLocationData(location)) { _ in }
     }
 
     func tencentLBSLocationManager(_ manager: TencentLBSLocationManager, didFailWithError error: Error) {
+        guard isListenLocationUpdates, manager === locationManager else { return }
         let code = (error as NSError).code
         flutterApi?.onError(code: Int64(code), message: error.localizedDescription) { _ in }
     }

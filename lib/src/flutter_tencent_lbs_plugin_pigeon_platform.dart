@@ -100,11 +100,9 @@ class FlutterTencentLBSPluginPigeonPlatform
     }
     _onceInFlight = true;
     try {
-      // Each request owns its reply, including replies arriving after timeout.
-      final data = await _hostApi.requestLocationOnce().timeout(
-        const Duration(seconds: 30),
-        onTimeout: () => null,
-      );
+      // Native code owns the deadline and releases SDK resources before replying,
+      // so the next request cannot race a timed-out request still in the SDK.
+      final data = await _hostApi.requestLocationOnce();
       return data == null || data.code != 0 ? null : _toLocation(data);
     } finally {
       _onceInFlight = false;

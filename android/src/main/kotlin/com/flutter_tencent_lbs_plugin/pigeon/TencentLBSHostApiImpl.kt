@@ -1,6 +1,7 @@
 package com.flutter_tencent_lbs_plugin.pigeon
 
 import android.content.Context
+import android.os.Handler
 import android.os.Looper
 import com.flutter_tencent_lbs_plugin.utils.NotificationUtils
 import com.tencent.map.geolocation.TencentLocation
@@ -16,13 +17,19 @@ import com.tencent.map.geolocation.TencentLocationRequest
 class TencentLBSHostApiImpl(
     private val context: Context,
     private val flutterApi: TencentLBSFlutterApi,
+    private val createLocationManager: (Context) -> TencentLocationManager = TencentLocationManager::getInstance,
 ) : TencentLBSHostApi, TencentLocationListener {
 
     private var locationManager: TencentLocationManager? = null
     private var tencentLocationRequest: TencentLocationRequest? = null
     private var isListeningLocationUpdates = false
     private var disposed = false
-    private val singleRequests = mutableMapOf<TencentLocationListener, (Result<LocationData?>) -> Unit>()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private data class PendingSingleRequest(
+        val callback: (Result<LocationData?>) -> Unit,
+        val timeout: Runnable,
+    )
+    private val singleRequests = mutableMapOf<TencentLocationListener, PendingSingleRequest>()
 
     override fun configure(options: InitOptions): Boolean {
         if (disposed) throw FlutterError("disposed", "定位插件已释放")
@@ -30,7 +37,7 @@ class TencentLBSHostApiImpl(
             throw FlutterError("in-progress", "定位进行中，不能重新初始化")
         }
         TencentLocationManagerOptions.setKey(options.apiKey)
-        locationManager = TencentLocationManager.getInstance(context)
+        locationManager = createLocationManager(context)
 
         // 坐标系：Flutter 0=GCJ02 -> Android 1, Flutter 1=WGS84 -> Android 0
         val coordType = when (options.coordinateType?.toInt()) {
@@ -66,8 +73,9 @@ class TencentLBSHostApiImpl(
         lateinit var listener: TencentLocationListener
         fun finish(result: Result<LocationData?>) {
             val pending = singleRequests.remove(listener) ?: return
+            mainHandler.removeCallbacks(pending.timeout)
             manager.removeUpdates(listener)
-            pending(result)
+            pending.callback(result)
         }
         // A single request must never consume a continuous callback or error.
         listener = object : TencentLocationListener {
@@ -79,7 +87,9 @@ class TencentLBSHostApiImpl(
 
             override fun onStatusUpdate(name: String?, status: Int, desc: String?) {}
         }
-        singleRequests[listener] = callback
+        val timeout = Runnable { finish(Result.success(null)) }
+        singleRequests[listener] = PendingSingleRequest(callback, timeout)
+        mainHandler.postDelayed(timeout, 30_000)
         try {
             val errorCode = manager.requestSingleFreshLocation(request, listener, Looper.getMainLooper())
             if (errorCode != TencentLocation.ERROR_OK) finish(Result.success(null))
@@ -185,12 +195,13 @@ class TencentLBSHostApiImpl(
             gpsFirstTimeOutMs = update.gpsFirstTimeOutMs,
         )
 
-        // Re-submit with the same listener; removeUpdates would stop the engine.
-        // Keep the foreground service and the old request if registration fails.
+        // SDK 7.6.1.9 appends even the same listener. Register first to preserve
+        // the running engine, then retire one registration without removeUpdates.
         val errorCode = manager.requestLocationUpdates(nextRequest, this, Looper.getMainLooper())
         if (errorCode != TencentLocation.ERROR_OK) {
             throw FlutterError("location-request-failed", "更新定位请求失败，保留原请求", errorCode)
         }
+        manager.removeLocationListener(this)
         tencentLocationRequest = nextRequest
     }
 
@@ -209,14 +220,15 @@ class TencentLBSHostApiImpl(
         singleRequests.clear()
         locationManager = null
         tencentLocationRequest = null
-        for ((listener, callback) in pending) {
+        for ((listener, request) in pending) {
+            mainHandler.removeCallbacks(request.timeout)
             manager?.removeUpdates(listener)
-            callback(Result.success(null))
+            request.callback(Result.success(null))
         }
     }
 
     override fun onLocationChanged(location: TencentLocation?, error: Int, reason: String?) {
-        if (disposed) return
+        if (disposed || !isListeningLocationUpdates) return
         if (error == TencentLocation.ERROR_OK && location != null) {
             flutterApi.onLocation(toLocationData(location)) {}
         } else {
@@ -267,7 +279,7 @@ class TencentLBSHostApiImpl(
     }
 
     override fun onStatusUpdate(name: String?, status: Int, desc: String?) {
-        if (disposed) return
+        if (disposed || !isListeningLocationUpdates) return
         flutterApi.onStatus(LocationStatusData(name = name, status = status.toLong())) {}
     }
 
